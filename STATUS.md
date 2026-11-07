@@ -186,7 +186,7 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 | 2 stm_bridge | **완료** (프레임·노드·vcan0 실측 확인, 아래) |
 | 3 arm_control | **완료** (쪼개기 전/후 숫자 비교 통과, 아래) |
 | 4 vision_node 뼈대 | **완료** (아래) + calibrate 대기 수정 |
-| 5 launch·README·NODES.md·package.xml 점검 | 할 일 |
+| 5 launch·README·NODES.md·package.xml 점검 | **launch·README·package.xml·시험 완료. NODES.md·ARCHITECTURE.md 반영은 파일이 없어 대기** (아래) |
 
 ### 1단계에서 한 일
 - 원본 복사(`.git` 제외, 각 `SOURCE.md`에 URL·SHA): ak45_can `6db174f`, ak45_ros2 `5495298`. 원본 그대로 한 번 커밋한 뒤 변경을 따로 커밋.
@@ -274,3 +274,47 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 
 ### 전체 회귀 (2026-11-07, 4개 패키지 새로 빌드: 경고 0)
 stm_bridge `check_protocol`·`check_node`, arm_control `check_protocol`(58 PASS, 원본과 출력 동일)·`check_node`·`check_split`·`check_calibrate_wait`·`chain_vcan.sh`(686 = 686)·`calibrate_vcan.sh`, vision_node `check_node` 전부 통과. `pgrep -fa 'stm_bridge_node|ak45_node|arm_control_node|vision_node'`는 `(none)`.
+
+### 5단계에서 한 일
+- `arm_control/launch/arm.launch.py`: `ak45_node`(ak45_ros2 launch 포함) + `stm_bridge_node`(name `stm_bridge`, 파라미터 `servo_channel`) + `arm_control_node`(`max_speed_deg_s`, `calibration_file`). 인자 `servo_channel`, `max_speed_deg_s`, `calibration_file` 유지. `setup.py`가 launch를 설치. `ak45_node`의 인터페이스는 컴파일 타임 `can0` 고정이라 `servo_channel`은 stm_bridge에만 적용.
+- `README.md`(레포 루트): 구조, 토픽 표, 설치(Jazzy), 실행, **calibrate를 쓸 때는 `arm_control_node`를 띄우지 않는다**(ak45_node와 stm_bridge만), 주의, 시험 표.
+- `package.xml` 점검: 각 패키지의 import와 선언을 대조. `vision_node`가 쓰는 `rcl_interfaces`가 빠져 있어 추가. 나머지는 일치(`python3-can`은 stm_bridge, `arm_control`은 `stm_bridge`·`ak45_ros2`·`geometry_msgs`에 의존, `humanoid_grasp_rl`은 ROS 패키지가 아니라 IK 저장소라 선언하지 않음).
+- 옛 이름 점검(`grep`): `sim2real`·`SimToReal`·`/sim2real/`는 README의 출처 설명과 비교 시험(`check_split.py`, `check_node.py` 주석)에만 남김(의도). `ak45_ros2`에 `ak45_5`·`ak45_6`·`0x06` 잔존 없음(`docs/ros2.md`의 이력 제외).
+- `tests/launch_vcan.sh`: 별도 네트워크 공간(`unshare -Urn`, sudo 없음, 호스트 네트워크 무변경)에 vcan `can0`를 만들고 `arm.launch.py` 전체 + `ak45_can/tools/ak45_vcan_sim.py`(AK45 4대 시뮬)를 띄움.
+
+### 5단계 검증 결과 (2026-11-07)
+| 항목 | 결과 |
+|---|---|
+| `ros2 launch arm_control arm.launch.py` (vcan `can0`) | 노드 `/ak45_node`, `/stm_bridge`, `/arm_control_node` 모두 뜸. launch 로그에 ERROR·Traceback·process died 없음. `/joint_states`가 `ak45_1~4` |
+| 시뮬 명령 1번(elbow −10°, wrist_pitch 20°, 300 deg/s) | AK45 id 4: `00000404#FFFE7960`(mode 4, int32 −100000 = −10°). 서보 9: `005#09044C`(90+20°). AK45 1~3은 명령 안 받음. `/servo/state` = 1.919862 rad |
+| Ctrl+C(SIGINT) | launch 종료, 3개 노드 모두 `finished cleanly`, traceback 없음. 종료 때 브레이크 0A 프레임 6개(ID 1~6, `ak45_can`의 `NUM_MOTORS=6`) |
+
+### 5단계에서 확인했지만 고치지 않은 것 (기록만)
+| 문제 | 확인 | 해결방안 |
+|---|---|---|
+| **calibrate 종료 시 core dump가 저장보다 먼저인가?** | **아니다. 저장이 먼저.** `calibration.json` 저장은 종료 때 자동으로 일어나지 않고 사용자가 `w`를 입력할 때만 일어난다(`Session.handle`). 실측(복사본 파일로): `w` 다음 `q` → `wrote …`가 abort보다 약 1 ms 앞서고 파일이 바뀌어 정상적으로 읽힘(`verified=True`). `w` 다음 EOF(`q` 없이)도 같음. `w` 없이 `q`로 끝내면 파일 불변(원본과 같은 설계: 저장 안 한 변경은 사라짐). dry-run(`--ros` 없음)은 abort 없음 | 사용자 결정에 따라 **기록만**. 데이터 손실은 없음. 원인은 `rclpy.shutdown()` 시 daemon spin 스레드(4단계에서 확인) |
+| `stm_bridge_node`, `arm_control_node`의 SIGTERM `ExternalShutdownException` traceback | 4단계에서 실측(각 2건). `ros2 launch`의 SIGINT에서는 없음(위 표) | 사용자 결정에 따라 **고치지 않고 기록만** |
+| **`ak45_node`가 프레임이 안 들어오는 상태에서 종료 신호를 받으면 끝나지 않음** | 프로세스 그룹에 SIGINT: 시뮬이 살아 있으면 1.0초에 종료, 시뮬을 먼저 끄면 10초 뒤에도 실행 중(SIGTERM 후에도 futex 대기). 추정 원인: `ak45_close()`가 `close(can_sock)`로 블로킹 `read()`를 깨우려 하지만 리눅스에서는 다른 스레드의 `close`가 `read`를 깨우지 않아 `pthread_join`에서 멈춤(`ak45_36_socketcan_control.cpp` 316~323행). 원본 `ak45_can`의 동작이며 `ak45_can`은 수정하지 않는 규칙 | 기록만. 실물에서는 모터 전원이 꺼지거나 피드백이 끊긴 채 Ctrl+C를 누르면 멈출 수 있고 `kill -KILL`이 필요. 고치려면 `ak45_can`의 수신 스레드가 `poll` 타임아웃을 쓰게 해야 함(별도 결정) |
+| 종료 때 브레이크 0A 프레임이 ID 5·6에도 나감 | 위 launch 시험에서 6개 확인 | `ak45_can` 수정 안 함. README 주의에 명시 |
+| `launch_vcan.sh`가 별도 네트워크 공간을 쓰는 이유 | `ak45_node`가 `can0` 고정 | sudo 없이 vcan `can0`를 만들 수 있다. AppArmor가 비특권 사용자 네임스페이스를 제한하는 PC(`kernel.apparmor_restrict_unprivileged_userns=1`)에서도 이 PC에서는 `unshare -Urn`이 동작함을 확인 |
+| 시험 스크립트 함정 | 메모 | ① `: >`로 비운 파일에 계속 쓰는 프로세스는 NUL을 채운다 → `>>`로 열고 `grep -a`. ② `&` 백그라운드 작업은 SIGINT가 무시된다 → `set -m`. ③ `ros2 topic echo --once`는 이미 발행된 메시지를 못 받는다(명령마다 발행되는 `/servo/state`는 echo를 먼저 띄운다). ④ `ros2 topic echo --field`는 Python 리스트 형식 |
+
+### NODES.md·ARCHITECTURE.md 반영 (대기)
+- `jax_ros/`에 두 파일이 **없다**(이 PC에서 3번 확인: `~/Desktop/ros2/`에 0바이트 파일만 있다. 편집기에서 저장하지 않은 버퍼일 수 있음). 내용을 모르는 파일을 새로 만들어 쓰지 않았다.
+- 파일이 들어오면 아래를 NODES.md에 명시한다:
+  1. `/servo/command` 단위(rad, 모터 각도)와 오프셋 변환은 **arm_control**이 한다(기존 "stm_bridge에서 변환"을 바꿈). stm_bridge는 프레임 송신만 하고, 0~180°를 벗어난 값이나 이름·길이·NaN이 틀린 메시지는 통째로 버린다.
+  2. `/object_pose`: **회전은 z축 yaw만**, 단위는 **도(°)**(vision_node `fixed_pose:=[x, y, yaw]`의 yaw. PoseStamped의 쿼터니언 자체에는 단위가 없다), **position.z는 사용하지 않는다**(`fixed_pose`에 높이가 없어 0.0).
+  3. 시뮬 관절 명령 토픽 `/arm_control/joint_command`(기존 `/sim2real/joint_command`).
+  4. `/servo/state`는 마지막으로 보낸 값(측정값 아님), `/joint_states`에 섞지 않는다.
+  5. `calibrate --ros`를 쓸 때는 `arm_control_node`를 띄우지 않는다.
+
+### 5단계 최종 확인 — 새 터미널 환경 (`env -i`, 2026-11-07)
+`env -i … bash --noprofile --norc`로 ROS 변수가 없는 새 셸을 흉내 내 `build install log`를 지우고 처음부터 실행.
+| 기준 | 결과 |
+|---|---|
+| `colcon build --symlink-install` 전체(ak45_ros2, stm_bridge, arm_control, vision_node) | **경고 0**, 오류 0. 4개 패키지 8.2초. `ros2 pkg executables`에 `ak45_node`, `ak45_deg`, `stm_bridge_node`, `arm_control_node`, `calibrate`, `pick_place`, `play_trajectory`, `vision_node` |
+| `arm.launch.py`로 노드 3개가 함께 뜸(vcan `can0`, 별도 네트워크 공간) | `/ak45_node`, `/stm_bridge`, `/arm_control_node` 확인, 시뮬 명령이 AK45 확장 프레임(`00000404#FFFE7960`)과 서보 프레임(`005#09044C`)으로 나가고 SIGINT로 3개 모두 `finished cleanly`. `tests/launch_vcan.sh` 11 PASS, 0 FAIL(검사 11개) |
+| 토픽 표(README) = 코드 | `/servo/command` 모터 각도 rad(`check_node`·`chain_vcan`·`launch_vcan`이 숫자로 확인: 110° = 1.919862 rad), `/servo/state` 보낸 값, `/ak45/command` 모터 각도 rad, `/arm_control/joint_command` 시뮬 각도 rad, `/object_pose` z축 yaw·`fixed_pose`의 yaw 도 단위·z 미사용(`vision_node/tests/check_node.py` 17개). **NODES.md와의 일치는 파일이 없어 확인하지 못함** |
+| 시험 뒤 남은 프로세스 | `pgrep -fa 'stm_bridge_node|ak45_node|arm_control_node|vision_node'` → `(none)` |
+| 전체 시험 | stm_bridge 2개, arm_control `check_protocol`(58 PASS)·`check_node`·`check_split`·`check_calibrate_wait`·`chain_vcan.sh`(686 = 686)·`calibrate_vcan.sh`·`launch_vcan.sh`, vision_node `check_node` 전부 통과 |
+- 같은 환경의 첫 전체 실행에서 `calibrate_vcan.sh`가 **1건 실패**했고(어느 검사인지 출력을 남기지 못함), 그 뒤 단독 연속 6회와 전체 재실행에서는 모두 통과했다. 원인 미확인. 이 시험은 실제 프로세스의 ROS 디스커버리와 `sleep` 시간(`calibrate` 입력 3초 등)에 의존하므로 느린 PC에서는 간헐적으로 실패할 수 있다. 재현되면 실패한 검사 이름이 `fresh.sh` 출력에 남도록 해 두었다.
