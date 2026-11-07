@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 DEFAULT_JOINT = "ak45_2"
-VALID_JOINTS = ["ak45_1", "ak45_2", "ak45_3", "ak45_4", "ak45_5", "ak45_6"]
+VALID_JOINTS = ["ak45_1", "ak45_2", "ak45_3", "ak45_4"]
 TOPIC = "/ak45/command"
 
 
