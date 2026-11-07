@@ -324,4 +324,9 @@ stm_bridge `check_protocol`·`check_node`, arm_control `check_protocol`(58 PASS,
 - 토픽 표 대조(`arm_control/tests/check_topics.sh`, vcan + 별도 네트워크 공간): **29개 모두 일치**(타입, 발행·구독 노드 18개, `/pressure` 없음, `/object_pose` 프레임·좌표·z=0·z축 yaw 20°, `/ak45/command` = `ak45_4`, −0.10472 rad, `/servo/command` = `W_PITCH`, 1.919862 rad = 모터 110°, `/servo/state` = 같은 값). 시험 뒤 `pgrep` 0개.
 - NODES.md의 줄 번호 참조 확인: `ak45_node.cpp` 111–116행·331행, `ak45_can` `.cpp` 91·193행은 현재 소스와 맞음. **`main.c` 142행은 GitHub CAN_STM `2c9c45f`에서 160–161행**(`rxHeader.IDE != CAN_ID_STD … StdId != CAN_SERVO_STDID`). 사용자가 말하지 않은 항목이라 NODES.md §6-5는 그대로 둠.
 - ARCHITECTURE.md는 사용자 지시("지금 없어도 됨")에 따라 만들지 않음.
-- 커밋 작성자: 사용자가 준 문구가 `<GitHub 이름>`, `<GitHub 이메일>` 자리표시자 그대로라 **아직 변경하지 않았다**(임시 `jeajune0221 <25_50@bssm.hs.kr>`). 실제 값을 받으면 `git config`와 `--reset-author`로 모든 커밋을 고친다(해시가 바뀐다. 이 문서의 해시 언급도 함께 확인).
+- 커밋 작성자: 아래 "커밋 작성자 정리" 참조(해결).
+
+### 커밋 작성자 정리 (2026-11-07)
+- 사용자가 준 값: 이름 `jeajune0221`, 이메일 `jeajune11117@gmail.com`(GitHub 계정에 등록된 값).
+- 이 레포의 로컬 `git config`(`--local`)에 설정했다. 전역 설정은 비어 있고 건드리지 않았다.
+- 임시 작성자(`jeajune0221 <25_50@bssm.hs.kr>`)로 만든 12개 커밋을 `git rebase --root --exec 'git commit --amend --no-edit --reset-author'`로 다시 썼다(push 전이라 안전). 확인: 작성자·커미터가 12개 모두 새 값 하나, 커밋별 트리 12/12 동일(파일 내용 변화 없음), 메시지 동일, `Co-Authored-By` 줄 12/12 보존. 커밋 해시는 전부 바뀌었다(이전 최신 `1260cb7`은 reflog에 남아 있다). 문서 안에 jax_ros 커밋 해시를 적어 둔 곳은 없었다.
