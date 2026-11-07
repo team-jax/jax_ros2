@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>stm_bridge</name>
+  <version>0.1.0</version>
+  <description>/servo/command (JointState, servo motor angle in rad) to CAN_STM servo frames (StdId 5); /servo/state is the last angle sent.</description>
+  <maintainer email="jeajune11117@gmail.com">jeajune0221</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-can</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
