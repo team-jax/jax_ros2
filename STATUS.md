@@ -330,3 +330,9 @@ stm_bridge `check_protocol`·`check_node`, arm_control `check_protocol`(58 PASS,
 - 사용자가 준 값: 이름 `jeajune0221`, 이메일 `jeajune11117@gmail.com`(GitHub 계정에 등록된 값).
 - 이 레포의 로컬 `git config`(`--local`)에 설정했다. 전역 설정은 비어 있고 건드리지 않았다.
 - 임시 작성자(`jeajune0221 <25_50@bssm.hs.kr>`)로 만든 12개 커밋을 `git rebase --root --exec 'git commit --amend --no-edit --reset-author'`로 다시 썼다(push 전이라 안전). 확인: 작성자·커미터가 12개 모두 새 값 하나, 커밋별 트리 12/12 동일(파일 내용 변화 없음), 메시지 동일, `Co-Authored-By` 줄 12/12 보존. 커밋 해시는 전부 바뀌었다(이전 최신 `1260cb7`은 reflog에 남아 있다). 문서 안에 jax_ros 커밋 해시를 적어 둔 곳은 없었다.
+
+### NODES.md 줄 번호 참조 → 이름 참조 (2026-11-07)
+- 사용자 지시로 NODES.md §6의 줄 번호를 함수·상수 이름으로 교체했다(줄 번호는 소스가 바뀌면 틀어진다: `main.c` 142행은 CAN_STM `2c9c45f`에서 이미 160–161행이었다).
+  - §6-4 `ak45_node.cpp` 111–116행 → 생성자 `Ak45Node::Ak45Node()`의 `joint_names_.size() != kNumMotors` 검사(`invalid joint_names size`), 331행 → `Ak45Node::onCommandTimer()`의 S3 검사 `st.valid == 0 || !wd_ok`.
+  - §6-5 `main.c` 142행 → `CAN_SERVO_STDID 5U`와 수신 콜백 `HAL_CAN_RxFifo0MsgPendingCallback()`의 `rxHeader.IDE != CAN_ID_STD`·`rxHeader.StdId != CAN_SERVO_STDID` 검사. 같은 문장의 라이브러리 91·193행도 `can_transmit_eid()`(`CAN_EFF_FLAG`를 붙임)와 `rx_thread()`(`CAN_EFF_FLAG`가 없는 프레임을 버림)로 교체(지시는 main.c와 ak45_node.cpp였으나 같은 문장이라 함께 고침).
+- 근거 확인: CAN_STM `2c9c45f`, ak45_can `6db174f`, jax_ros의 ak45_node.cpp에서 위 이름 13개가 모두 소스에 있음을 `grep -F`로 확인. NODES.md에 남은 줄 번호 참조 0건. 위 "NODES.md 반영" 항목의 줄 번호 서술(111–116행·331행·142행·160–161행)은 당시 기록이라 그대로 둔다.
