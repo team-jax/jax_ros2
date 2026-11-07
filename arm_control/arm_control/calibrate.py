@@ -33,6 +33,7 @@ from .motion import ramp
 from stm_bridge.protocol import servo_frame
 
 HZ = 50
+SERVO_WAIT_S = 5.0     # how long a servo command waits for stm_bridge to be seen on /servo/command
 
 
 class DryOutput:
@@ -61,15 +62,28 @@ class DryOutput:
 class RosOutput:
     live = True
 
-    def __init__(self, node):
+    def __init__(self, node, servo_wait_s=SERVO_WAIT_S):
         from .ros_io import Ak45Topics, ServoTopic
         self.ak45 = Ak45Topics(node)
         self.servo = ServoTopic(node)
+        self.servo_wait_s = servo_wait_s
+
+    def wait_for_stm_bridge(self):
+        """A message published before ROS discovery has matched the subscriber is lost, and a servo's
+        first command (its jump) is sent only once. So a servo command waits until /servo/command has
+        a subscriber, and is refused (RuntimeError, nothing sent) if none shows up."""
+        end = time.monotonic() + self.servo_wait_s
+        while self.servo.pub.get_subscription_count() < 1:
+            if time.monotonic() > end:
+                raise RuntimeError(f"no subscriber on /servo/command after {self.servo_wait_s:g} s "
+                                   "(is stm_bridge running?); nothing sent")
+            time.sleep(0.05)
 
     def send(self, joint, deg):
         if joint.motor == "ak45":
             self.ak45.publish([(joint, deg)])
         else:
+            self.wait_for_stm_bridge()
             self.servo.publish([(joint, deg)])
 
     def feedback(self, joint):
@@ -193,7 +207,7 @@ def main(argv=None):
             try:
                 if not s.handle(line):
                     break
-            except (KeyError, ValueError, TypeError) as e:
+            except (KeyError, ValueError, TypeError, RuntimeError) as e:
                 print(f"  {e}")
     except KeyboardInterrupt:
         print("\n  stopped; motors keep their last command")

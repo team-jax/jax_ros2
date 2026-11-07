@@ -185,7 +185,7 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 | 1 뼈대 + ak45_can/ak45_ros2 복사 + 4모터 | **완료** (아래) |
 | 2 stm_bridge | **완료** (프레임·노드·vcan0 실측 확인, 아래) |
 | 3 arm_control | **완료** (쪼개기 전/후 숫자 비교 통과, 아래) |
-| 4 vision_node 뼈대 | 할 일 |
+| 4 vision_node 뼈대 | **완료** (아래) + calibrate 대기 수정 |
 | 5 launch·README·NODES.md·package.xml 점검 | 할 일 |
 
 ### 1단계에서 한 일
@@ -253,3 +253,24 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 | 원본 `docker_check.sh`, `in_container.sh` 미이전 | 열림 | 이 PC에 docker 없음(검증 불가). 같은 검사는 `check_protocol/check_node/check_split/chain_vcan.sh`로 대체. 필요하면 5단계에서 jax_ros용으로 다시 쓴다 |
 | `check_protocol.py`의 IK 경로 기본값 `~/IK`(없으면 SKIP) | 기록 | `--ik ~/Desktop/IK`로 돌리면 시뮬 범위 비교까지 통과(58 PASS) |
 | `ak45_ros2`와 `ak45_node`가 `can0` 전용 | 기록 | 실제 노드는 vcan으로 못 시험(fake_ak45로 대체) |
+
+### 4단계에서 한 일 (vision_node 뼈대)
+- `vision_node/vision_node.py`: 파라미터 `fixed_pose:=[x, y, yaw]`(x·y는 m, **yaw는 도(°)**: `pick_place --cube x y yaw`와 같은 단위 선택, 반시계 방향)가 있을 때만 1 Hz로 `/object_pose`(PoseStamped, `frame_id=shoulder_roll_axis`)를 발행. 회전은 z축 yaw만(`x=y=0`, `z=sin(yaw/2)`, `w=cos(yaw/2)`). `fixed_pose`에는 높이가 없어 `position.z=0.0`(의미 없음, 코드·docstring에 명시). 파라미터가 없거나 숫자 3개가 아니거나(길이 2·4, NaN, inf, 문자열) 하면 **발행자도 만들지 않고** 로그만 남긴다. 정수 목록 `[1, 2, -90]`은 숫자이므로 받는다. 카메라(SteroDepthSeg)는 연결하지 않음. `dynamic_typing`으로 선언(기본값 `[]`은 BYTE_ARRAY로 추정되어 `[0.1, -0.3, 20.0]`도 거절되던 것을 시험에서 발견해 고침).
+- 검증 `tests/check_node.py`(실제 `ros2 run`, 17개 통과): 파라미터 없음 → 4초간 0개, 발행자도 0개 / 잘못된 값 5종 → 0개 / `[0.10, -0.30, 20.0]` → 6.5초에 6개, 간격 1.0/0.999/1.0/1.0/1.0 s, `frame_id`, x·y, z=0, yaw 20.000000°, 단위 쿼터니언, stamp. `arm_control_node`의 `/object_pose` 로그 수신은 3단계에서 확인.
+- 의존성: `rclpy`, `geometry_msgs`.
+
+### calibrate --ros 변경 (원본 SimToReal 대비, 사용자 요청)
+- **이유:** 원본은 서보 프레임을 CAN에 직접 썼지만, 쪼갠 뒤에는 `/servo/command`로 발행한다. 발행자를 만든 직후(ROS 디스커버리 전)에 보낸 메시지는 구독자에게 도착하지 않고, 서보의 첫 명령(점프)은 한 번만 가므로 **첫 명령이 사라진다.** 수정 전 코드로 재현: `j W_PITCH / m 100 / m +10`을 즉시 파이프하면 첫 프레임 `005#0903E8`이 사라지고 램프의 둘째 프레임 `005#0903EE`부터 보였다(17프레임). 사람이 천천히 입력하면 드러나지 않던 문제.
+- **변경:** `RosOutput.wait_for_stm_bridge()` — 서보 명령을 보내기 전에 `/servo/command` 구독자가 1개 이상 보일 때까지 기다린다(최대 `SERVO_WAIT_S=5` 초, 상수이며 CLI 옵션은 추가하지 않음). 안 보이면 `RuntimeError("no subscriber on /servo/command after 5 s (is stm_bridge running?); nothing sent")`로 거절하고 아무것도 보내지 않으며, 그 관절의 마지막 명령으로도 기록하지 않는다(`main`의 예외 처리에 `RuntimeError` 추가). AK45 관절은 기다리지 않는다(피드백이 없으면 원래대로 "not moving").
+- **검증:** `tests/check_calibrate_wait.py`(구독자 없음 → 1.00 s 뒤 거절·기록 안 됨, 0.6 s 뒤 구독자가 생기면 첫 명령이 도착, 이미 있으면 대기 없음). `tests/calibrate_vcan.sh`(실제 프로세스, vcan0): 수정 후 즉시 파이프해도 첫 프레임 `005#0903E8`, 마지막 `005#09044C`, 18프레임. stm_bridge 없음 → 5초 뒤 거절, 프레임 0, 이동으로 표시 안 됨. stm_bridge 없이 AK45(elbow)는 정상 이동.
+
+### 4단계의 문제점·메모
+| 문제 | 상태 | 해결방안 |
+|---|---|---|
+| `calibrate --ros` 종료 시 `terminate called without an active exception`(core dump) | **원인 확인**(원본에도 있음) | spin 스레드가 도는 채로 `rclpy.shutdown()`을 부르면 abort. `check_calibrate_wait.py`에서 `executor.shutdown()` + 스레드 join을 먼저 하니 종료 코드 0으로 사라짐. `calibrate.py` 본체는 쪼개기와 무관해 고치지 않음 — 원하면 같은 방식으로 고친다 |
+| `stm_bridge_node`, `arm_control_node`가 SIGTERM으로 끝날 때 `ExternalShutdownException` traceback | 기록만(`sim2real_node`와 같은 코드) | 실측: 두 노드 2건, `vision_node` 0건(새 코드라 처리함). Ctrl+C·launch의 SIGINT에서는 `KeyboardInterrupt`로 정상. 필요하면 두 노드도 같은 한 줄로 고친다 |
+| `fixed_pose` yaw 단위(도)와 `position.z=0.0` | 결정 필요 | NODES.md에 단위가 있으면 5단계에서 맞춘다 |
+| 테스트 중 `kill -- -PID`·`pkill -f`·`pgrep -f` 주의 | 메모 | 패턴 문자열이 같은 Bash 호출 본문에 있으면 도구 래퍼가 매칭됨. 시험은 스크립트 파일로 실행 |
+
+### 전체 회귀 (2026-11-07, 4개 패키지 새로 빌드: 경고 0)
+stm_bridge `check_protocol`·`check_node`, arm_control `check_protocol`(58 PASS, 원본과 출력 동일)·`check_node`·`check_split`·`check_calibrate_wait`·`chain_vcan.sh`(686 = 686)·`calibrate_vcan.sh`, vision_node `check_node` 전부 통과. `pgrep -fa 'stm_bridge_node|ak45_node|arm_control_node|vision_node'`는 `(none)`.
