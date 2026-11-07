@@ -72,8 +72,8 @@ ros2 run arm_control calibrate --ros                 # ROS가 없는 곳: python
 
 ### 주의
 
-- **종료하면 AK45가 힘을 놓는다.** `ak45_node`가 끝날 때 `ak45_can`이 Current Brake 0A 프레임을 ID 1~**6**에 보낸다(`NUM_MOTORS=6`이라 5·6은 받는 모터가 없다). 먼저 팔을 받친다.
-- **`ak45_node`는 CAN 프레임이 더 안 들어오는 상태에서는 SIGINT/SIGTERM으로 끝나지 않을 수 있다**(`ak45_close()`가 소켓을 닫아 블로킹 읽기를 깨우려 하는데 깨어나지 않는다. 프레임이 오면 1초에 끝난다). 모터 전원이 꺼졌을 때는 `kill -KILL`이 필요할 수 있다.
+- **종료하면 AK45가 힘을 놓는다.** `ak45_node`가 끝날 때 `ak45_can`이 Current Brake 0A 프레임을 ID 1~**6**에 보낸다(`NUM_MOTORS=6`이라 5·6은 받는 모터가 없다). 먼저 팔을 받친다. AK45는 확장 29비트 ID, STM 서보 보드는 표준 11비트 프레임만 받으므로(`main.c`의 IDE 검사) 지금은 충돌하지 않지만, **나중에 ID 5·6 AK45를 추가하면 이 브레이크 프레임이 그 모터에 간다.**
+- **`ak45_node`는 CAN 프레임이 더 안 들어오는 상태에서는 SIGINT/SIGTERM으로 끝나지 않을 수 있다**(`ak45_close()`가 소켓을 닫아 블로킹 읽기를 깨우려 하는데 깨어나지 않는다. 프레임이 오면 1초에 끝난다). 모터 전원이 꺼졌을 때는 `kill -KILL`이 필요할 수 있다. **실물 시험 때는 두 번째 터미널을 열어 두고 `pkill -KILL -f ak45_node`를 바로 칠 수 있게 한다.**
 - `calibration.json`의 값은 전부 `verified: false`(영점·방향·관절↔모터 대응이 가정)다. `pick_place`/`play_trajectory`는 `verified`가 아닌 관절이 있으면 거절한다(`--force`로 넘길 수 있다).
 - AK45 위치가 출력축 기준인지 로터 기준인지(V3)는 문서마다 다르다. **첫 실제 명령은 2° 정도로 보내 출력축이 얼마나 도는지 눈으로 확인한 뒤** 진행한다.
 
@@ -91,6 +91,7 @@ CAN은 `vcan`으로 시험한다(`sudo modprobe vcan && sudo ip link add dev vca
 | `python3 arm_control/tests/check_calibrate_wait.py`, `bash arm_control/tests/calibrate_vcan.sh` | calibrate가 stm_bridge를 기다림 |
 | `bash arm_control/tests/chain_vcan.sh` | vcan0에서 50 Hz, 발행한 서보 수 = candump 프레임 수 |
 | `bash arm_control/tests/launch_vcan.sh` | `arm.launch.py` 전체(별도 네트워크 공간에 `can0`를 만들어 sudo가 필요 없다) |
+| `bash arm_control/tests/check_topics.sh` | NODES.md §4 토픽 표(타입, 발행·구독 노드, 메시지 내용)를 실행 중인 시스템과 대조 |
 | `python3 vision_node/tests/check_node.py` | `fixed_pose`가 없거나 틀리면 발행 없음, 있으면 1 Hz |
 
 시험 스크립트를 쓸 때 `pkill -f`·`pgrep -f` 패턴이 같은 셸 명령 본문에 들어 있으면 자기 자신이 매칭된다. 스크립트 파일로 실행한다.
@@ -98,4 +99,5 @@ CAN은 `vcan`으로 시험한다(`sudo modprobe vcan && sudo ip link add dev vca
 ## 문서
 
 - `STATUS.md` — 했던 일, 하고 있는 일, 할 일, 목표, 기술, 문제점과 해결방안, 단계별 검증 결과.
-- `NODES.md`, `ARCHITECTURE.md` — 노드와 구조 설명. **아직 이 폴더에 없다**(`STATUS.md`의 5단계 항목 참조). 이 README의 토픽 표가 현재 기준이다.
+- `NODES.md` — 노드 구성과 토픽 표(2026-11-07에 이 구현에 맞춰 고침). 표는 `arm_control/tests/check_topics.sh`로 실행 중인 시스템과 대조한다.
+- `ARCHITECTURE.md` — **아직 이 폴더에 없다.**

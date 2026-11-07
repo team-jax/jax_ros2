@@ -299,7 +299,7 @@ stm_bridge `check_protocol`·`check_node`, arm_control `check_protocol`(58 PASS,
 | `launch_vcan.sh`가 별도 네트워크 공간을 쓰는 이유 | `ak45_node`가 `can0` 고정 | sudo 없이 vcan `can0`를 만들 수 있다. AppArmor가 비특권 사용자 네임스페이스를 제한하는 PC(`kernel.apparmor_restrict_unprivileged_userns=1`)에서도 이 PC에서는 `unshare -Urn`이 동작함을 확인 |
 | 시험 스크립트 함정 | 메모 | ① `: >`로 비운 파일에 계속 쓰는 프로세스는 NUL을 채운다 → `>>`로 열고 `grep -a`. ② `&` 백그라운드 작업은 SIGINT가 무시된다 → `set -m`. ③ `ros2 topic echo --once`는 이미 발행된 메시지를 못 받는다(명령마다 발행되는 `/servo/state`는 echo를 먼저 띄운다). ④ `ros2 topic echo --field`는 Python 리스트 형식 |
 
-### NODES.md·ARCHITECTURE.md 반영 (대기)
+### NODES.md·ARCHITECTURE.md 반영 (NODES.md 완료 2026-11-07, ARCHITECTURE.md 대기)
 - `jax_ros/`에 두 파일이 **없다**(이 PC에서 3번 확인: `~/Desktop/ros2/`에 0바이트 파일만 있다. 편집기에서 저장하지 않은 버퍼일 수 있음). 내용을 모르는 파일을 새로 만들어 쓰지 않았다.
 - 파일이 들어오면 아래를 NODES.md에 명시한다:
   1. `/servo/command` 단위(rad, 모터 각도)와 오프셋 변환은 **arm_control**이 한다(기존 "stm_bridge에서 변환"을 바꿈). stm_bridge는 프레임 송신만 하고, 0~180°를 벗어난 값이나 이름·길이·NaN이 틀린 메시지는 통째로 버린다.
@@ -318,3 +318,10 @@ stm_bridge `check_protocol`·`check_node`, arm_control `check_protocol`(58 PASS,
 | 시험 뒤 남은 프로세스 | `pgrep -fa 'stm_bridge_node|ak45_node|arm_control_node|vision_node'` → `(none)` |
 | 전체 시험 | stm_bridge 2개, arm_control `check_protocol`(58 PASS)·`check_node`·`check_split`·`check_calibrate_wait`·`chain_vcan.sh`(686 = 686)·`calibrate_vcan.sh`·`launch_vcan.sh`, vision_node `check_node` 전부 통과 |
 - 같은 환경의 첫 전체 실행에서 `calibrate_vcan.sh`가 **1건 실패**했고(어느 검사인지 출력을 남기지 못함), 그 뒤 단독 연속 6회와 전체 재실행에서는 모두 통과했다. 원인 미확인. 이 시험은 실제 프로세스의 ROS 디스커버리와 `sleep` 시간(`calibrate` 입력 3초 등)에 의존하므로 느린 PC에서는 간헐적으로 실패할 수 있다. 재현되면 실패한 검사 이름이 `fresh.sh` 출력에 남도록 해 두었다.
+
+### NODES.md 반영 (2026-11-07)
+- 사용자가 채팅으로 준 원문을 `jax_ros/NODES.md`로 저장하고 고쳤다: ① 환경을 이 PC의 실제 값(Ubuntu 24.04 + ROS 2 Jazzy)으로(학교 노트북의 OS 설치·허락은 [미확정] 유지) ② `/servo/command`는 모터 각도 rad, 변환은 arm_control, stm_bridge는 프레임 송신만·범위 밖/이름·길이·NaN 오류는 통째로 버림 ③ AK45 4개(ID 0x01~0x04) ④ `/servo/state`는 마지막으로 보낸 값(측정값 아님), **서보 10 Hz 재송신은 구현하지 않았음**(`[제안, 미구현]`로 사실대로) ⑤ `/object_pose`는 z축 yaw만, yaw 단위 도(`fixed_pose`; 쿼터니언 자체엔 단위 없음), z 미사용, 좌표계 명시 ⑥ 구현 순서 표에 상태 열 추가(1·2단계 vcan 시험 완료, 3단계 일부, 4단계 뼈대만, 5단계 미착수)와 jax_ros 1~5단계 요약. 새 행: `/arm_control/joint_command`. 사용자가 말하지 않은 [미확정]·[미해결] 항목은 그대로 둠.
+- 토픽 표 대조(`arm_control/tests/check_topics.sh`, vcan + 별도 네트워크 공간): **29개 모두 일치**(타입, 발행·구독 노드 18개, `/pressure` 없음, `/object_pose` 프레임·좌표·z=0·z축 yaw 20°, `/ak45/command` = `ak45_4`, −0.10472 rad, `/servo/command` = `W_PITCH`, 1.919862 rad = 모터 110°, `/servo/state` = 같은 값). 시험 뒤 `pgrep` 0개.
+- NODES.md의 줄 번호 참조 확인: `ak45_node.cpp` 111–116행·331행, `ak45_can` `.cpp` 91·193행은 현재 소스와 맞음. **`main.c` 142행은 GitHub CAN_STM `2c9c45f`에서 160–161행**(`rxHeader.IDE != CAN_ID_STD … StdId != CAN_SERVO_STDID`). 사용자가 말하지 않은 항목이라 NODES.md §6-5는 그대로 둠.
+- ARCHITECTURE.md는 사용자 지시("지금 없어도 됨")에 따라 만들지 않음.
+- 커밋 작성자: 사용자가 준 문구가 `<GitHub 이름>`, `<GitHub 이메일>` 자리표시자 그대로라 **아직 변경하지 않았다**(임시 `jeajune0221 <25_50@bssm.hs.kr>`). 실제 값을 받으면 `git config`와 `--reset-author`로 모든 커밋을 고친다(해시가 바뀐다. 이 문서의 해시 언급도 함께 확인).
