@@ -100,11 +100,18 @@ def main():
     check("state names in motor_id order", list(last.name), ["F1_1", "W_PITCH"])
     check("state is the angle sent, rad", [round(p, 6) for p in last.position], [round(radians(90.0), 6), round(radians(110.0), 6)])
 
+    n_states = len(states)
     send(["W_PITCH"], [200.0])
     frames = run(0.5)
-    check("200 deg is clipped to 180", frames, ["005#090708"])
-    check("state holds the clipped angle and the other servo's last one",
-          [round(p, 6) for p in states[-1].position], [round(radians(90.0), 6), round(radians(180.0), 6)])
+    check("200 deg: dropped, no frame, no new state", (frames, len(states)), ([], n_states))
+    send(["F1_1", "W_PITCH"], [90.0, -5.0])
+    frames = run(0.5)
+    check("-5 deg in the second joint: the whole message is dropped (F1_1 too)", (frames, len(states)), ([], n_states))
+    send(["W_PITCH", "F1_1"], [180.0, 0.0])
+    frames = run(0.5)
+    check("the ends 180 and 0 deg pass", sorted(frames), ["005#000000", "005#090708"])
+    check("state follows the last frames",
+          [round(p, 6) for p in states[-1].position], [0.0, round(radians(180.0), 6)])
 
     node.destroy_node()
     peer.destroy_node()

@@ -1,10 +1,11 @@
 """Byte-level checks with no device and no ROS. Exit code 0 when everything passes.
 
-    python3 tests/check_protocol.py
+    python3 tests/check_protocol.py [--calibration calibration.json]
 
 Expected bytes come from team-jax/CAN_STM Stm32servosepc.md section 8 (cansend examples), not from
 this code.
 """
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -35,6 +36,10 @@ def raises(name, fn):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--calibration", default=str(ROOT.parent / "arm_control" / "calibration.json"),
+                    help="calibration.json to compare the servo names with (default: arm_control's)")
+    a = ap.parse_args()
     check("StdId is 5", SERVO_STDID, 5)
     check("servo 0 -> 0 deg", str(servo_frame(0, 0)), "005#000000")
     check("servo 3 -> 90 deg", str(servo_frame(3, 90)), "005#030384")
@@ -49,7 +54,7 @@ def main():
 
     check("servo names cover motor_id 0..9 once", sorted(SERVO_IDS.values()), list(range(SERVO_COUNT)))
     # the same names and ids as arm_control's calibration.json (skipped until that package exists)
-    cal = ROOT.parent / "arm_control" / "calibration.json"
+    cal = Path(a.calibration)
     if cal.exists():
         rows = json.loads(cal.read_text())["joints"]
         check("names match calibration.json", {r["name"]: r["id"] for r in rows if r["motor"] == "servo"},

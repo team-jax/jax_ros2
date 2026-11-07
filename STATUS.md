@@ -183,7 +183,7 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 |---|---|
 | 0 조사·계획 | 완료(승인 받음) |
 | 1 뼈대 + ak45_can/ak45_ros2 복사 + 4모터 | **완료** (아래) |
-| 2 stm_bridge | **코드·프레임 테스트·노드 로직 테스트 완료. python-can 버스(vcan0 + candump) 검증은 대기** (아래) |
+| 2 stm_bridge | **완료** (프레임·노드·vcan0 실측 확인, 아래) |
 | 3 arm_control | 할 일 |
 | 4 vision_node 뼈대 | 할 일 |
 | 5 launch·README·NODES.md·package.xml 점검 | 할 일 |
@@ -199,7 +199,7 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 | ak45_ros2에 기존 테스트가 없음 | 열림 | 1단계 검증은 빌드·파라미터 검증·종료 코드로 대체. 노드 실행 시험은 vcan 준비 후 |
 | `ak45_can`의 `NUM_MOTORS=6` | 기록만 | 종료 시 브레이크 0A 프레임이 ID 5·6에도 나감(받는 모터 없음). 라이브러리는 수정하지 않음 |
 | `max_command_deg` 주석("출력축 기준 판별 완료", 2026-08-27)과 `docs/ros2.md` §13.9·README §9("V3 미실시") 불일치 | 기록만 | 값은 바꾸지 않는다. 팀 확인 전까지 `calibration.json`의 `scale`=1 유지(로터 기준이면 출력축은 1/36만 돈다). **첫 실제 명령은 2° 소량으로 보내 출력축이 실제로 얼마나 도는지 육안으로 확인한 뒤** 진행 |
-| `python3-can` 미설치, vcan0 없음(2026-11-07 17:2x 확인: `pip list`·`dpkg`에 없고 `/sys/class/net`에 can 장치 없음, `can`·`can_raw` 모듈만 로드) | **열림, 사용자 준비 대기** | `sudo apt install python3-can`, `sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set up vcan0`. 그 뒤 아래 "vcan 검증"을 실행 |
+| `python3-can` 미설치, vcan0 없음 | **해결(2026-11-07)** | 사용자가 설치. python-can 4.3.1, vcan0 UP 확인 |
 | NODES.md·ARCHITECTURE.md가 `jax_ros/`에 없음(`~/Desktop/ros2/`에는 0바이트 파일) | 열림 | 사용자가 내용을 넣으면 5단계에서 반영 |
 | `~/Desktop/IK`는 `main` 브랜치, `real_task.py` 없음 | 기록만 | `pick_place` 끝까지 시험은 `sim-table-friction` 브랜치 필요. IK는 수정하지 않음 |
 | `~/Desktop/ak45_ros2`에 커밋 안 된 이전 시도(arm_control 등) | 읽기만 | 수정·삭제 금지, 복사 전 질문 |
@@ -212,6 +212,16 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 - `stm_bridge/servo_names.py`: 서보 이름→motor_id 표(`F1_1`=0 … `W_PITCH`=9). 근거 CAN_STM `Stm32pinmap.md` §3. 원본 `calibration.json`의 서보 `name`·`id`와 일치함을 직접 비교(True).
 - `stm_bridge/stm_bridge_node.py`: `/servo/command`(JointState, 서보 이름, **모터 각도 rad**) 구독 → 이름·길이·NaN이 틀린 메시지는 통째로 버림 → `degrees()` → `servo_frame` → CAN 송신(파라미터 `servo_interface=socketcan`, `servo_channel=can0`) → `/servo/state`(마지막으로 보낸 각도, rad, motor_id 순) 발행. 첫 명령 전에는 아무것도 보내지 않음. 0~180°를 벗어나면 펌웨어처럼 자르고 WARN.
 - 검증(통과): `tests/check_protocol.py` 12개(`005#000000`, `005#030384`, `005#090708`, 클립, 반올림, `005#09044C` 등), `tests/check_node.py` 10개(FakeCan: 첫 명령 전 무송신, 이름·길이·NaN 통째 버림, 서보 2개 → 프레임 2개, 200°→`005#090708`, 상태는 보낸 값). `colcon build --packages-select stm_bridge` 성공.
-- **미검증: python-can 버스.** python3-can이 없어 `tests/check_node.py`는 FakeCan으로 돌았고, `ServoCan`(실제 `can.Bus`)과 vcan0 → `candump` 확인은 아직 못 함.
 - vcan 검증 절차(준비 후): `ros2 run stm_bridge stm_bridge_node --ros-args -p servo_channel:=vcan0` → 다른 터미널 `candump vcan0` → `ros2 topic pub -1 /servo/command sensor_msgs/msg/JointState "{name: [W_PITCH], position: [1.5708]}"` 이면 `005#090384`가 보여야 한다. `python3 tests/check_node.py`는 python-can이 있으면 virtual 버스로 돈다.
+- 범위 밖 각도: 처음에는 0~180°로 자르고 WARN이었으나, 사용자 기준(잘못된 메시지는 통째로 버림)에 맞춰 **0~180°(±0.05° 여유) 밖이 하나라도 있으면 메시지 전체를 버리도록** 바꿈. 원본 흐름에서는 arm_control이 이미 서보 범위로 자른 값만 보내므로 정상 경로 동작은 같다.
+
+### 2단계 마무리 기준 확인 결과 (2026-11-07, python-can 4.3.1, vcan0)
+| 기준 | 결과 |
+|---|---|
+| 프레임 바이트 테스트(`SERVO_STDID=5`, W_PITCH 90° → `005#090384`) | 통과. `tests/check_protocol.py` 12개 + 이름 표 2개 |
+| vcan0에서 `/servo/command` 발행 → `candump vcan0` | W_PITCH 1.5707963 rad → `005#090384`. W_PITCH 1.0 rad → `005#09023D`, F1_1 2.0 rad → `005#00047A`(손계산: 57.3°→573, 114.6°→1146과 일치). 첫 명령 전 프레임 0개. 명령 1번에 프레임 1개씩 |
+| `/servo/state`는 마지막으로 보낸 값 | 첫 명령 전 0개, 이후 명령마다 1개. 마지막 메시지 `[F1_1, W_PITCH]` = `[2.00015, 1.00007]` rad. 보낸 값(1146, 573 count)을 되돌린 값이라 입력 2.0/1.0 rad와 0.0001 rad 정도 다르다 → 측정값이 아니라 보낸 값임을 확인 |
+| 이름→id 표 = calibration.json의 name/id | 통과. 원본 SimToReal `calibration.json`으로 `--calibration` 실행(arm_control이 생기면 기본 경로로 3단계에서 다시 실행) |
+| 잘못된 메시지는 통째로 버림 | vcan0 실측: 모르는 이름(BAD), 길이 불일치, NaN, 3.5 rad(200.5°) → 프레임·상태 증가 0, WARN 4개. 두 관절 중 하나만 −5°인 메시지는 `tests/check_node.py`(python-can virtual 버스)에서 첫 관절(F1_1)도 안 나가는 것을 확인. 한 곳의 WARN이 5초 스로틀이라 같은 종류의 연속 WARN은 하나만 보인다 |
+- 측정 중 프레임·상태가 2배로 나온 적이 있었다. 이전 시도에서 `kill`이 `ros2 run` 래퍼만 죽여 남은 `stm_bridge_node`가 하나 더 있었기 때문이다. 정리 후에는 1배. 시험할 때 노드 중복 실행에 주의(`ros2 run`은 PID로 자식까지 죽일 것).
 - 설계 메모: CAN 송신 오류(`can.CanError`)는 잡지 않는다(원본 `sim2real_node`와 같음). 필요하면 별도로 결정.
