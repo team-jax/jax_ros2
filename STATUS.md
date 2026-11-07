@@ -184,7 +184,7 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 | 0 조사·계획 | 완료(승인 받음) |
 | 1 뼈대 + ak45_can/ak45_ros2 복사 + 4모터 | **완료** (아래) |
 | 2 stm_bridge | **완료** (프레임·노드·vcan0 실측 확인, 아래) |
-| 3 arm_control | 할 일 |
+| 3 arm_control | **완료** (쪼개기 전/후 숫자 비교 통과, 아래) |
 | 4 vision_node 뼈대 | 할 일 |
 | 5 launch·README·NODES.md·package.xml 점검 | 할 일 |
 
@@ -225,3 +225,31 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 | 잘못된 메시지는 통째로 버림 | vcan0 실측: 모르는 이름(BAD), 길이 불일치, NaN, 3.5 rad(200.5°) → 프레임·상태 증가 0, WARN 4개. 두 관절 중 하나만 −5°인 메시지는 `tests/check_node.py`(python-can virtual 버스)에서 첫 관절(F1_1)도 안 나가는 것을 확인. 한 곳의 WARN이 5초 스로틀이라 같은 종류의 연속 WARN은 하나만 보인다 |
 - 측정 중 프레임·상태가 2배로 나온 적이 있었다. 이전 시도에서 `kill`이 `ros2 run` 래퍼만 죽여 남은 `stm_bridge_node`가 하나 더 있었기 때문이다. 정리 후에는 1배. 시험할 때 노드 중복 실행에 주의(`ros2 run`은 PID로 자식까지 죽일 것).
 - 설계 메모: CAN 송신 오류(`can.CanError`)는 잡지 않는다(원본 `sim2real_node`와 같음). 필요하면 별도로 결정.
+
+### 3단계에서 한 일 (arm_control)
+- 파일 이동(원본 `sim2real/`): `calibration.py`, `motion.py`, `watch.py`, `play.py`, `planner.py`, `pick_place.py`, `calibrate.py`, `calibration.json`(**값 그대로**, `cmp`로 원본과 동일 확인), 루트 `calibrate.py`(ROS 없는 dry-run). `protocol.py`는 AK45 부분만 남기고 서보 프레임(`Frame`, `servo_frame`)은 `stm_bridge.protocol`에서 import(`exec_depend stm_bridge`).
+- `node.py` → `arm_control_node.py`: 서보 직접 CAN 송신을 없애고 `/servo/command`(이름=`calibration.json`의 `name`, 모터 각도 rad) 발행. 한 틱의 서보 전부를 메시지 1개에 담는다(시작 점프 먼저, 그다음 속도제한 스텝: 원본과 같은 순서). `rate_hz`, `max_speed_deg_s`, `calibration_file` 파라미터 유지, `servo_interface`·`servo_channel`은 stm_bridge로 이동. `/object_pose`(PoseStamped) 구독은 **로그만**(yaw 계산해 출력, 로봇은 안 움직임).
+- `ros_io.py`: `Ak45Topics` 유지, `ServoCan` 삭제, `ServoTopic`(/servo/command 발행) 추가. 이름 변경: `sim2real` → `arm_control`, `/sim2real/joint_command` → `/arm_control/joint_command`, `sim2real_node` → `arm_control_node`. 옛 이름은 비교용 `tests/check_split.py`와 그 주석에만 남김(의도).
+- `calibrate --ros`: 서보를 CAN 직접 송신 대신 `/servo/command`로 발행, `--servo-interface`·`--servo-channel` 삭제. **calibrate를 쓸 때는 `arm_control_node`를 띄우지 않는다**(ak45_node와 stm_bridge만). README에는 5단계에서 명시.
+- 테스트: `check_protocol.py`(원본과 출력이 줄 단위로 동일, 58 PASS), `check_node.py`(arm_control_node → stm_bridge_node → virtual CAN 전체 체인, 원본의 기대값 그대로: `005#09044C`, `005#0903FC`, 팔꿈치 rad), `check_split.py`, `chain_vcan.sh`+`chain_load.py`(vcan0 50 Hz 부하), `fake_ak45.py`.
+
+### 3단계 검증 결과 (2026-11-07)
+| 항목 | 결과 |
+|---|---|
+| 쪼개기 전/후 비교 (`tests/check_split.py --original SimToReal`) | 같은 명령 7개(유효·클립·부분·이름/길이/NaN 오류)를 900틱. **`/ak45/command` 326개 메시지 전부 이름·위치 동일**, 서보 프레임 493개 **id·순서·count 전부 동일(차이 0)** |
+| 서보 왕복(deg → rad → deg → count) 0~180° | 23,601개(0.05° 간격 3601 + 무작위 20000) **버려진 값 0개**. 원본 `servo_frame` 대비 count 차이 0: 23,514개, +1: 81개, −1: 6개(0.05° 경계의 반올림). **±1 count는 기록하고 통과**(사용자 기준), 그 이상은 없음 |
+| 0° / 180°(π rad) 경계 | 0 rad → `…0000`, math.pi → `…0708`, radians(180.0) → `…0708`, degrees(π)=180.0 정확히. −0.049°·180.049°는 보냄(0/180으로), −0.06°·180.06°·−1°·181°는 버림, π+4.5e-16 rad는 180으로 보냄 |
+| 이름→id 표 (arm_control 기본 `calibration.json`) | 통과(`stm_bridge/tests/check_protocol.py`, 인자 없이 실행) |
+| 50 Hz 부하 (`tests/chain_vcan.sh`, 실제 프로세스 3개 + vcan0) | 서보 6개·AK45 1개 이동. `/servo/command`로 발행한 서보 **686개(메시지 152개) = candump 프레임 686개**. 서보 6개의 마지막 프레임이 전부 목표값. `/servo/state` 메시지 152개. 2회 실행 결과 동일 |
+| 프로세스 정리 | `pgrep -fa 'stm_bridge_node|ak45_node|arm_control_node'` 시험 전 `(none)`, 후 `(none)`, 전체 시험 뒤 count=0. (주의: pgrep 패턴 문자열이 Bash 도구의 명령 본문에 들어가면 그 래퍼가 매칭되어 1줄이 보임. 스크립트 파일로 실행하면 0) |
+| 기타 | `/object_pose` 발행 → 로그 1줄, 버스 프레임 0. `calibrate --ros`(arm_control_node 없이): `005#0903E8` 점프 후 50 Hz로 `005#09044C`까지. `play_trajectory --dry-run`은 원본처럼 "calibration not verified"로 거절(종료 1). `pick_place --dry-run`은 `~/IK`가 없어 안내 메시지(원본과 같음) |
+| 빌드 | `colcon build` 전체(ak45_ros2, stm_bridge, arm_control) 경고 0 |
+
+### 3단계의 문제점·메모
+| 문제 | 상태 | 해결방안 |
+|---|---|---|
+| `calibrate --ros` 종료 시 `terminate called without an active exception`(core dump) | **원본 SimToReal에서도 같음**(원본 `calibrate --ros --servo-interface virtual`로 확인). 쪼개기와 무관 | 고치지 않음. 원인은 spin 스레드(daemon)가 도는 채로 종료하는 것으로 추정(미확인) |
+| `calibrate --ros`의 첫 `/servo/command`는 발행자 생성 직후 보내면 디스커버리 전이라 사라질 수 있음(원본은 직접 CAN이라 없던 문제) | 기록 | 사람이 `j`, `m`을 입력하는 속도에서는 문제 없음을 확인(3초 뒤 입력). 스크립트로 즉시 보낼 때만 주의 |
+| 원본 `docker_check.sh`, `in_container.sh` 미이전 | 열림 | 이 PC에 docker 없음(검증 불가). 같은 검사는 `check_protocol/check_node/check_split/chain_vcan.sh`로 대체. 필요하면 5단계에서 jax_ros용으로 다시 쓴다 |
+| `check_protocol.py`의 IK 경로 기본값 `~/IK`(없으면 SKIP) | 기록 | `--ik ~/Desktop/IK`로 돌리면 시뮬 범위 비교까지 통과(58 PASS) |
+| `ak45_ros2`와 `ak45_node`가 `can0` 전용 | 기록 | 실제 노드는 vcan으로 못 시험(fake_ak45로 대체) |
