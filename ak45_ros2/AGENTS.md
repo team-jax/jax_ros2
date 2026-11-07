@@ -3,7 +3,7 @@
 # ak45_ros2
 
 ## Purpose
-CubeMars AK45-36 모터 6대(CAN ID 0x01~0x06)의 SocketCAN 피드백을 폴링해 `/joint_states`(50Hz)와 `/diagnostics`(2Hz)로 발행하는 **ROS2 Humble 단일 노드 패키지**. 프로젝트 Phase 1에 해당하며 **읽기 전용이다 — 모터 이동 명령을 보내지 않는다**(종료 시 라이브러리 내부에서 나가는 Current Brake 0A 프레임 6개는 예외).
+CubeMars AK45-36 모터 4대(CAN ID 0x01~0x04)의 SocketCAN 피드백을 폴링해 `/joint_states`(50Hz)와 `/diagnostics`(2Hz)로 발행하는 **ROS2 Humble 단일 노드 패키지**. 프로젝트 Phase 1에 해당하며 **읽기 전용이다 — 모터 이동 명령을 보내지 않는다**(종료 시 라이브러리 내부에서 나가는 Current Brake 0A 프레임은 예외. ak45_can의 NUM_MOTORS=6 때문에 ID 5·6에도 나간다).
 
 **사양서는 이 저장소의 [`docs/ros2.md`](docs/ros2.md)** (v3.0)다. 이름·값·QoS·로그 문구·검증 항목 V0~V15가 전부 확정값으로 적혀 있고, **구현은 그 문서를 그대로 따르는 것이 계약이다.** 프로젝트 전체 상태는 **[`team-jax/ak45_can`](https://github.com/team-jax/ak45_can) 의 `docs/STATUS.md`** 를 본다.
 

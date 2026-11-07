@@ -20,7 +20,7 @@
 |---|---|---|---|---|
 | `publish_rate_hz` | `double` | `50.0` | `> 0.0` && `<= 500.0` | FATAL → 종료 코드 1 |
 | `diagnostics_rate_hz` | `double` | `2.0` | `> 0.0` && `<= 50.0` | FATAL → 종료 코드 1 |
-| `joint_names` | `string[]` | `["ak45_1" ... "ak45_6"]` | **길이가 정확히 6** | FATAL → 종료 코드 1 |
+| `joint_names` | `string[]` | `["ak45_1" ... "ak45_4"]` | **길이가 정확히 4** | FATAL → 종료 코드 1 |
 
 상한 500 근거: 서보 모드 피드백 업로드 주파수 상한이 500Hz다. 그보다 빠르게 폴링해도 같은 값을 중복 발행할 뿐이다.
 
@@ -36,16 +36,16 @@
 | 관절별 부호(±1) / 영점 오프셋 | URDF 미확정. 지금 만들면 값이 전부 추측(±1, 0.0)이라 "설정은 있는데 아무도 안 채운 파라미터"가 된다 |
 
 ### `joint_names` 주의
-- **개수(6개)만 검증하고 중복은 검증하지 않는다.** 중복 이름을 넣으면 `robot_state_publisher`가 마지막 값으로 덮어써서 **TF가 조용히 어긋난다** — 에러도 경고도 뜨지 않는다.
-- 배열 순서가 **CAN ID 0x01~0x06과 1:1**이다. 순서를 섞으면 관절과 모터의 대응이 어긋난다.
-- 현재 값 `ak45_1`~`ak45_6`은 **URDF 확정 전 임시값**이다(7DOF/8DOF 조율 중). URDF가 정해지면 여기서 교체한다 — 그래서 launch가 `params_file`을 인자로 받는다.
+- **개수(4개)만 검증하고 중복은 검증하지 않는다.** 중복 이름을 넣으면 `robot_state_publisher`가 마지막 값으로 덮어써서 **TF가 조용히 어긋난다** — 에러도 경고도 뜨지 않는다.
+- 배열 순서가 **CAN ID 0x01~0x04와 1:1**이다. 순서를 섞으면 관절과 모터의 대응이 어긋난다.
+- 현재 값 `ak45_1`~`ak45_4`는 **URDF 확정 전 임시값**이다(7DOF/8DOF 조율 중). URDF가 정해지면 여기서 교체한다 — 그래서 launch가 `params_file`을 인자로 받는다.
 
 ### 선언 시 함정
 `declare_parameter<std::vector<std::string>>("joint_names", {"a","b"})`처럼 중괄호 리스트를 직접 넘기면 템플릿 인자 추론이 실패할 수 있다. **기본값 변수를 먼저 만들어 넘긴다.**
 
 ## Testing Requirements
 ```bash
-ros2 param get /ak45_state_publisher joint_names     # 6개 반환 (V10)
+ros2 param get /ak45_state_publisher joint_names     # 4개 반환 (V10)
 ros2 launch ak45_ros2 state_publisher.launch.py params_file:=/경로/실험용.yaml
 ```
 

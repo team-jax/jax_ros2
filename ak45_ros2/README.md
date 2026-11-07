@@ -1,6 +1,6 @@
 # ak45_ros2
 
-CubeMars AK45-36 6개를 다루는 ROS2 Humble 노드 **하나**(`ak45_node`).
+CubeMars AK45-36 4개(CAN ID 0x01~0x04)를 다루는 ROS2 Humble 노드 **하나**(`ak45_node`).
 
 - **Phase 1 — 읽기**: CAN 피드백을 `/joint_states`(50Hz) · `/diagnostics`(2Hz)로 발행
 - **Phase 2 — 쓰기**: `/ak45/command`를 구독해 100ms 주기로 `ak45_set_position()` 재송신
@@ -215,14 +215,14 @@ colcon build --packages-select ak45_ros2   # config 를 install 로 복사
 
 ## 6. 종료하면 홀딩 토크가 풀린다
 
-Ctrl+C 시 `ak45_close()` → `ak45_emergency_stop()` 으로 **Current Brake 0A 프레임 6개**
+Ctrl+C 시 `ak45_close()` → `ak45_emergency_stop()` 으로 **Current Brake 0A 프레임 6개**(ak45_can의 NUM_MOTORS=6이라 모터가 4개여도 ID 5·6까지 나간다. 받는 모터는 없다)
 (`0x00000201` ~ `0x00000206`)가 나간다. 0A라 모터가 **힘을 놓는다.**
 
 → **출력축에 무게가 걸려 있으면 중력으로 떨어진다. 미리 받쳐둘 것.**
 
 ## 7. `joint_names` 에 중복 이름을 넣지 말 것
 
-노드는 `joint_names` 의 **개수(정확히 6개)만 검증하고 중복은 검증하지 않는다.**
+노드는 `joint_names` 의 **개수(정확히 4개)만 검증하고 중복은 검증하지 않는다.**
 중복된 이름을 넣으면 `robot_state_publisher` 가 같은 이름의 마지막 값으로 덮어써서
 **TF가 조용히 어긋난다.** 에러도 경고도 뜨지 않으므로 원인을 찾기 매우 어렵다.
 
@@ -232,7 +232,7 @@ Ctrl+C 시 `ak45_close()` → `ak45_emergency_stop()` 으로 **Current Brake 0A 
 |---|---|---|---|---|
 | `publish_rate_hz` | `double` | `50.0` | `> 0.0` && `<= 500.0` | FATAL 후 종료 코드 1 |
 | `diagnostics_rate_hz` | `double` | `2.0` | `> 0.0` && `<= 50.0` | FATAL 후 종료 코드 1 |
-| `joint_names` | `string[]` | `["ak45_1" ... "ak45_6"]` | 길이가 정확히 6 | FATAL 후 종료 코드 1 |
+| `joint_names` | `string[]` | `["ak45_1" ... "ak45_4"]` | 길이가 정확히 4 | FATAL 후 종료 코드 1 |
 | `command_resend_rate_hz` | `double` | `10.0` | `> 0.0` && `<= 50.0` | FATAL 후 종료 코드 1 |
 | `max_command_deg` | `double` | `15.0` | `> 0.0` && `<= 360.0` | FATAL 후 종료 코드 1 |
 | `command_timeout_sec` | `double` | `0.0` | `>= 0.0` (0=타임아웃 없음) | FATAL 후 종료 코드 1 |
