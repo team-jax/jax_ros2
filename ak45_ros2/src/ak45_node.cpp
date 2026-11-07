@@ -1,6 +1,6 @@
 // ak45_node.cpp
 //
-// CubeMars AK45-36 6개를 하나의 노드로 다룬다.
+// CubeMars AK45-36 4개를 하나의 노드로 다룬다.
 //   Phase 1 : CAN 피드백을 폴링해 /joint_states 와 /diagnostics 로 발행 (읽기)
 //   Phase 2 : /ak45/command 를 구독해 ak45_set_position() 으로 재송신 (쓰기)
 //
@@ -49,8 +49,8 @@ private:
 
   static std::string fmt2(double v);   // 소수 2자리 (snprintf)
 
-  static constexpr std::size_t kNumMotors = 6;
-  static constexpr uint8_t kMotorIds[kNumMotors] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+  static constexpr std::size_t kNumMotors = 4;
+  static constexpr uint8_t kMotorIds[kNumMotors] = {0x01, 0x02, 0x03, 0x04};
 
   std::vector<std::string> joint_names_;
   double publish_rate_hz_{50.0};
@@ -83,7 +83,7 @@ Ak45Node::Ak45Node()
 {
   // 2. 파라미터 선언·읽기 (§4.6)
   const std::vector<std::string> default_joint_names = {
-    "ak45_1", "ak45_2", "ak45_3", "ak45_4", "ak45_5", "ak45_6"};
+    "ak45_1", "ak45_2", "ak45_3", "ak45_4"};
 
   publish_rate_hz_     = this->declare_parameter<double>("publish_rate_hz", 50.0);
   diagnostics_rate_hz_ = this->declare_parameter<double>("diagnostics_rate_hz", 2.0);
@@ -111,7 +111,7 @@ Ak45Node::Ak45Node()
   if (joint_names_.size() != kNumMotors) {
     RCLCPP_FATAL(
       this->get_logger(),
-      "joint_names는 정확히 6개여야 합니다(AK45 ID 0x01~0x06 순서). 입력 개수=%zu",
+      "joint_names는 정확히 4개여야 합니다(AK45 ID 0x01~0x04 순서). 입력 개수=%zu",
       joint_names_.size());
     throw std::runtime_error("invalid joint_names size");
   }
@@ -372,7 +372,7 @@ void Ak45Node::onDiagTimer()
 {
   diagnostic_msgs::msg::DiagnosticArray da;
   da.header.stamp = this->now();
-  da.status.reserve(kNumMotors + 1);   // 모터 6개 + can_bus 1개
+  da.status.reserve(kNumMotors + 1);   // 모터 4개 + can_bus 1개
 
   int valid_count = 0;
 
@@ -381,7 +381,7 @@ void Ak45Node::onDiagTimer()
     const MotorState st = ak45_get_state(id);
     const bool wd_ok = (ak45_is_watchdog_ok(id) != 0);
     if (st.valid != 0) {++valid_count;}
-    da.status.push_back(makeStatus(i, id, st, wd_ok));   // 모터는 항상 6개
+    da.status.push_back(makeStatus(i, id, st, wd_ok));   // 모터는 항상 4개
   }
 
   // CAN 물리층. 재송신이 가려주고 있는 문제를 드러내기 위한 항목이다.
@@ -408,7 +408,7 @@ void Ak45Node::onDiagTimer()
   if (valid_count == 0) {
     RCLCPP_WARN_THROTTLE(
       this->get_logger(), *this->get_clock(), 5000,
-      "6개 모터 모두 피드백 없음. CubeMarsTool의 'Send status over CAN' Rate(Hz)가 0인지 확인하세요.");
+      "4개 모터 모두 피드백 없음. CubeMarsTool의 'Send status over CAN' Rate(Hz)가 0인지 확인하세요.");
   }
 }
 
