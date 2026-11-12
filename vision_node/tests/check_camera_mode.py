@@ -102,6 +102,7 @@ def main():
         q = m.pose.orientation
         check("camera frame: x, y of quaternion 0, unit length", q.x == 0 and q.y == 0 and abs(q.z ** 2 + q.w ** 2 - 1) < 1e-12)
         check("camera frame: stamp set", m.header.stamp.sec > 0)
+    check("camera frame: start log shows the allowed labels", "cube_labels ['blob', 'kite']" in log)
     check("camera frame: log says it is camera coordinates, once", log.count("임시: 카메라 좌표, 로봇 좌표 아님") == 1,
           log.count("임시: 카메라 좌표, 로봇 좌표 아님"))
 
@@ -159,7 +160,7 @@ def main():
     # --- 4. bad parameters: nothing published, no publisher, process ends its work quietly
     write(p, obj(), NOISE)
     for bad in ("camera_to_robot:=[1.0, 0.0, 0.0, 0.0, 0.0]", "camera_to_robot:=[.nan, 0.0, 0.0, 0.0, 0.0, 0.0]",
-                "cube_dim_mm:=[80.0, 40.0]", "depth_range_m:=[0.3]", "poll_hz:=0.0", "max_age_s:=-1.0",
+                "cube_dim_mm:=[80.0, 40.0]", "cube_labels:=[]", "cube_labels:=abc", "depth_range_m:=[0.3]", "poll_hz:=0.0", "max_age_s:=-1.0",
                 "fixed_pose:=[0.1, -0.3, 20.0]"):
         r = Run(node, f"result_json:={p}", bad)
         r.spin(2.5)

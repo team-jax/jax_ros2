@@ -121,5 +121,26 @@ for name, p, par, want in (
     got = camera_to_robot(p, par)
     check(f"transform: {name}", near(got, want), tuple(round(v, 12) for v in got))
 
+# cube_labels
+pick, why = select_cube(doc(cube(label="kite")), DIM, DEPTH)
+check("label kite passes with the default cube_labels", pick is not None and pick["instance"] == 1, why)
+pick, why = select_cube(doc(cube(label="person")), DIM, DEPTH)
+check("label person is rejected by default, reason names the label", pick is None and "label 'person'" in why, why)
+pick, why = select_cube(doc(cube(label="person")), DIM, DEPTH, ["*"])
+check('cube_labels ["*"]: person passes too', pick is not None, why)
+check("cube_labels [\"kite\"] only: blob is rejected", select_cube(doc(cube()), DIM, DEPTH, ["kite"])[0] is None)
+pick, why = select_cube(doc(cube(label="kite"), cube(2, label="blob")), DIM, DEPTH)
+check("kite and blob both candidates: ambiguous", pick is None and "ambiguous" in why, why)
+
+# dropped objects are named with the reason in the log text
+_, why = select_cube(doc(NOISE, cube(3, label="person"), cube(4, status="bad"), cube(5, depth_rect_m=2.0),
+                         cube(6, dims_mm=[30.0, 55.5, 2.8])), DIM, DEPTH)
+check("reason: 5 objects counted", "no cube candidate among 5 objects" in why, why)
+check("reason: dims of the noise blob (instance 2)", "instance 2: dims_mm 93.2x38.1 outside cube_dim_mm [40.0, 80.0]" in why, why)
+check("reason: label of instance 3", "instance 3: label 'person' not in cube_labels ['blob', 'kite']" in why, why)
+check("reason: status of instance 4", "instance 4: status 'bad' is not 'ok'" in why, why)
+check("reason: depth of instance 5", "instance 5: depth_rect_m 2 outside depth_range_m [0.3, 1.0]" in why, why)
+check("reason: dims of instance 6", "instance 6: dims_mm 30x55.5 outside" in why, why)
+
 print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

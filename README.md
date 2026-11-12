@@ -62,8 +62,8 @@ ros2 run vision_node vision_node --ros-args -p result_json:=<runs 폴더>/cube_t
 
 ### vision_node 카메라 모드 (`result_json`)
 카메라 프로그램(SteroDepthSeg, 자체 venv)은 `--out` 폴더의 `inference.json`을 약 1초마다 덮어쓴다. `vision_node`는 그 파일만 읽는다(카메라 코드·torch를 import하지 않는다).
-- 파라미터: `result_json`(SteroDepthSeg `--out` 폴더의 `inference.json` 경로, 기본 빈 문자열), `poll_hz`(2), `max_age_s`(3), `cube_dim_mm`([40, 80]), `depth_range_m`([0.3, 1.0]), `camera_to_robot`([tx, ty, tz, roll_deg, pitch_deg, yaw_deg], 기본 빈 목록). `fixed_pose`와 같이 주면 오류, 발행 없음.
-- 후보: `label == "blob"`, `status == "ok"`, `dims_mm`의 가로·세로가 `cube_dim_mm` 안, `depth_rect_m`가 `depth_range_m` 안. **정확히 1개일 때만** 발행(0개·2개 이상이면 이유만 로그). 파일 수정 시각이 `max_age_s`보다 오래됐거나 JSON이 깨졌으면 발행하지 않는다(로그). 같은 파일 내용은 다시 발행하지 않는다.
+- 파라미터: `result_json`(SteroDepthSeg `--out` 폴더의 `inference.json` 경로, 기본 빈 문자열), `poll_hz`(2), `max_age_s`(3), `cube_labels`(["blob", "kite"], `["*"]`이면 모든 라벨), `cube_dim_mm`([40, 80]), `depth_range_m`([0.3, 1.0]), `camera_to_robot`([tx, ty, tz, roll_deg, pitch_deg, yaw_deg], 기본 빈 목록). `fixed_pose`와 같이 주면 오류, 발행 없음.
+- 후보: `label`이 `cube_labels`에 있음(기본 `blob`, `kite`: COCO/YOLO가 큐브를 `kite`로 분류한 실제 사례. `["*"]`이면 전부), `status == "ok"`, `dims_mm`의 가로·세로가 `cube_dim_mm` 안, `depth_rect_m`가 `depth_range_m` 안. **정확히 1개일 때만** 발행(0개·2개 이상이면 이유만 로그: 버려진 객체마다 label / status / dims / depth 중 무엇 때문인지 포함). 파일 수정 시각이 `max_age_s`보다 오래됐거나 JSON이 깨졌으면 발행하지 않는다(로그). 같은 파일 내용은 다시 발행하지 않는다.
 - 좌표: `camera_to_robot`이 비면 `frame_id = camera`(카메라 좌표 그대로, OpenCV: x 오른쪽·y 아래·z 앞, **로봇 좌표 아님**), 있으면 `p_robot = R·p_cam + t`(R = Rz(yaw)·Ry(pitch)·Rx(roll))로 바꿔 `frame_id = shoulder_roll_axis`. 둘 다 **임시**(폰 고정 방법 미정). **yaw는 카메라 기준**(`rotation.yaw_deg` 그대로, 로봇 좌표 yaw로 바꾸지 않음). 이 경우 시작할 때 "임시: 카메라 좌표, 로봇 좌표 아님"을 로그로 남긴다.
 
 ### 보정 (calibrate)

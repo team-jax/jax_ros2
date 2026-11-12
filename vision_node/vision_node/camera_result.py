@@ -3,7 +3,7 @@
 The camera program (SteroDepthSeg, z_phone_stereo.py) overwrites <out>/inference.json about once a
 second. Layout checked on real files (phone_stereo/runs/cube_test/inference.json):
 
-    {"objects": {"seg": [ {"instance": 1, "label": "blob", "status": "ok", "dims_mm": [w, h, thick],
+    {"objects": {"seg": [ {"instance": 1, "label": "blob" (or "kite"), "status": "ok", "dims_mm": [w, h, thick],
                            "depth_rect_m": 0.469, "center_cam1_m": [x, y, z],
                            "rotation": {"yaw_deg": 6.0, ...}, ...}, ... ]}, ...}
 
@@ -38,10 +38,34 @@ def read_result(path, now, max_age_s):
     return raw, None
 
 
-def select_cube(raw, cube_dim_mm, depth_range_m):
+DEFAULT_LABELS = ("blob", "kite")
+
+
+def reject_reason(o, cube_labels, cube_dim_mm, depth_range_m):
+    """None if object `o` is a candidate, else why not (the first failing one of label, status, dims, depth)."""
+    label = o.get("label")
+    if "*" not in cube_labels and label not in cube_labels:
+        return f"label {label!r} not in cube_labels {list(cube_labels)}"
+    if o.get("status") != "ok":
+        return f"status {o.get('status')!r} is not 'ok'"
+    dims = numbers(o.get("dims_mm"), 3)
+    if dims is None:
+        return f"dims_mm {o.get('dims_mm')!r} invalid"
+    if not (cube_dim_mm[0] <= dims[0] <= cube_dim_mm[1] and cube_dim_mm[0] <= dims[1] <= cube_dim_mm[1]):
+        return f"dims_mm {dims[0]:g}x{dims[1]:g} outside cube_dim_mm {list(cube_dim_mm)}"
+    depth = o.get("depth_rect_m")
+    if not isinstance(depth, (int, float)) or isinstance(depth, bool) or not isfinite(depth):
+        return f"depth_rect_m {depth!r} invalid"
+    if not depth_range_m[0] <= depth <= depth_range_m[1]:
+        return f"depth_rect_m {depth:g} outside depth_range_m {list(depth_range_m)}"
+    return None
+
+
+def select_cube(raw, cube_dim_mm, depth_range_m, cube_labels=DEFAULT_LABELS):
     """Chooses the cube in the file content `raw` (bytes or str).
 
-    Candidate: label "blob", status "ok", dims_mm[0] and dims_mm[1] both inside cube_dim_mm
+    Candidate: label in cube_labels ("*" in it allows every label; COCO/YOLO may call the cube "kite"),
+    status "ok", dims_mm[0] and dims_mm[1] both inside cube_dim_mm
     (inclusive), depth_rect_m inside depth_range_m (inclusive). Exactly one candidate is needed;
     with none or several nothing is chosen (never pick "some" cube).
     Returns ({"xyz": (x, y, z) camera metres, "yaw_deg": camera-referenced yaw, "instance": n}, None)
@@ -54,18 +78,15 @@ def select_cube(raw, cube_dim_mm, depth_range_m):
     if not isinstance(objects, dict):
         return None, "no 'objects' dict in the file"
     rows = [o for lst in objects.values() if isinstance(lst, list) for o in lst if isinstance(o, dict)]
-    lo_d, hi_d = cube_dim_mm
-    lo_z, hi_z = depth_range_m
-    cands = []
+    cands, dropped = [], []
     for o in rows:
-        dims = numbers(o.get("dims_mm"), 3)
-        depth = o.get("depth_rect_m")
-        if (o.get("label") == "blob" and o.get("status") == "ok" and dims is not None
-                and lo_d <= dims[0] <= hi_d and lo_d <= dims[1] <= hi_d
-                and isinstance(depth, (int, float)) and not isinstance(depth, bool) and lo_z <= depth <= hi_z):
+        why = reject_reason(o, cube_labels, cube_dim_mm, depth_range_m)
+        if why is None:
             cands.append(o)
+        else:
+            dropped.append(f"instance {o.get('instance')}: {why}")
     if len(cands) == 0:
-        return None, f"no cube candidate among {len(rows)} objects"
+        return None, f"no cube candidate among {len(rows)} objects" + (": " + "; ".join(dropped) if dropped else "")
     if len(cands) > 1:
         return None, f"{len(cands)} cube candidates (instances {[c.get('instance') for c in cands]}): ambiguous"
     c = cands[0]

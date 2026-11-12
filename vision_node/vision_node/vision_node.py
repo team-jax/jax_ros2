@@ -17,13 +17,15 @@ once a second by z_phone_stereo.py, which runs in its own venv: this node only r
 
   poll_hz        2.0           how often the file is looked at; a changed file content is published once
   max_age_s      3.0           a file modified longer ago than this is not used (warning only)
+  cube_labels    ["blob", "kite"]  allowed label of the cube; ["*"] = every label. "blob" = a bump over the
+                               table plane, "kite" = what COCO (YOLO) called the cube in a real file
   cube_dim_mm    [40.0, 80.0]  both of dims_mm[0], dims_mm[1] must be inside (a 5 cm cube measured 60-68)
   depth_range_m  [0.3, 1.0]    depth_rect_m must be inside
   camera_to_robot  []          [tx, ty, tz, roll_deg, pitch_deg, yaw_deg]: p_robot = R · p_cam + t,
                                R = Rz(yaw)·Ry(pitch)·Rx(roll). TEMPORARY, the phone mount is not fixed yet.
 
-Only one candidate (label "blob", status "ok", size and depth inside the ranges) is published; with
-none or several nothing is, and the reason is logged. Broken JSON (file being rewritten) is skipped.
+Only one candidate (label in cube_labels, status "ok", size and depth inside the ranges) is published; with
+none or several nothing is, and the reason is logged (for each dropped object: label, status, dims or depth). Broken JSON (file being rewritten) is skipped.
 frame_id: camera_to_robot empty -> "camera" (position = camera coordinates as they are, OpenCV: x right,
 y down, z forward; NOT robot coordinates); camera_to_robot given -> "shoulder_roll_axis".
 The yaw is rotation.yaw_deg of the camera program as it is, CAMERA-REFERENCED, not converted to the
@@ -56,6 +58,7 @@ class VisionNode(Node):
         result_json = self.declare_parameter("result_json", "", dyn).value
         self.poll_hz = self.declare_parameter("poll_hz", 2.0, dyn).value
         self.max_age_s = self.declare_parameter("max_age_s", 3.0, dyn).value
+        self.cube_labels = self.declare_parameter("cube_labels", ["blob", "kite"], dyn).value
         self.cube_dim_mm = self.declare_parameter("cube_dim_mm", [40.0, 80.0], dyn).value
         self.depth_range_m = self.declare_parameter("depth_range_m", [0.3, 1.0], dyn).value
         self.camera_to_robot = self.declare_parameter("camera_to_robot", None, dyn).value
@@ -100,6 +103,9 @@ class VisionNode(Node):
         elif c2r is not None and not (isinstance(c2r, (list, tuple)) and len(c2r) == 0) \
                 and numbers(c2r, 6) is None:
             err = f"camera_to_robot must be empty or six finite numbers [tx, ty, tz, roll, pitch, yaw], got {c2r!r}"
+        elif (not isinstance(self.cube_labels, (list, tuple)) or len(self.cube_labels) == 0
+              or not all(isinstance(v, str) and v for v in self.cube_labels)):
+            err = f"cube_labels must be a non-empty list of strings (or ['*']), got {self.cube_labels!r}"
         elif numbers(self.cube_dim_mm, 2) is None or not 0 < self.cube_dim_mm[0] <= self.cube_dim_mm[1]:
             err = f"cube_dim_mm must be [min, max] with 0 < min <= max, got {self.cube_dim_mm!r}"
         elif numbers(self.depth_range_m, 2) is None or not 0 < self.depth_range_m[0] <= self.depth_range_m[1]:
@@ -112,6 +118,7 @@ class VisionNode(Node):
             self.get_logger().error(f"{err}; nothing is published")
             return
         self.path = path
+        self.cube_labels = tuple(self.cube_labels)
         self.cube_dim_mm = numbers(self.cube_dim_mm, 2)
         self.depth_range_m = numbers(self.depth_range_m, 2)
         self.c2r = numbers(c2r, 6) if c2r else None
@@ -125,7 +132,7 @@ class VisionNode(Node):
         else:
             self.get_logger().info(f"camera_to_robot {self.c2r}: frame_id {FRAME_ID}; the yaw is camera-referenced")
         self.get_logger().info(f"{TOPIC} from {path} (poll_hz {self.poll_hz:g}, max_age_s {self.max_age_s:g}, "
-                               f"cube_dim_mm {self.cube_dim_mm}, depth_range_m {self.depth_range_m})")
+                               f"cube_labels {list(self.cube_labels)}, cube_dim_mm {self.cube_dim_mm}, depth_range_m {self.depth_range_m})")
 
     def note(self, reason):
         """Warning when the reason changes, otherwise at most every 10 s (the file is polled 2x a second)."""
@@ -142,7 +149,7 @@ class VisionNode(Node):
         if raw == self.last_raw:     # same file content as the last look: nothing new
             return
         self.last_raw = raw
-        pick, why = select_cube(raw, self.cube_dim_mm, self.depth_range_m)
+        pick, why = select_cube(raw, self.cube_dim_mm, self.depth_range_m, self.cube_labels)
         if pick is None:
             self.note(why)
             return
