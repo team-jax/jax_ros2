@@ -1,6 +1,6 @@
 # camera_to_robot of vision_node: p_robot = R · p_cam + t, R = Rz(yaw)·Ry(pitch)·Rx(roll).
 # [tx, ty, tz (m), roll, pitch, yaw (deg)]
-# 2회 측정, 정확도 약 3 cm, 폰 위치를 옮기면 다시 구해야 함, 2026-11-12
+# 2회 측정, 정확도 미확정: 독립 위치 시험에서 약 9.4 cm 어긋남(2026-11-12), 근거 점 3개는 줄자 측정이라 신뢰 낮음, 폰 위치를 옮기면 다시 구해야 함, 2026-11-12
 # (다시 구할 때: python3 vision_node/tools/solve_camera_to_robot.py, 이 파일의 값을 바꾼다)
 vision_node:
   ros__parameters:
