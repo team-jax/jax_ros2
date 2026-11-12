@@ -1,0 +1,7 @@
+# camera_to_robot of vision_node: p_robot = R · p_cam + t, R = Rz(yaw)·Ry(pitch)·Rx(roll).
+# [tx, ty, tz (m), roll, pitch, yaw (deg)]
+# 2회 측정, 정확도 약 3 cm, 폰 위치를 옮기면 다시 구해야 함, 2026-11-12
+# (다시 구할 때: python3 vision_node/tools/solve_camera_to_robot.py, 이 파일의 값을 바꾼다)
+vision_node:
+  ros__parameters:
+    camera_to_robot: [0.053520, -0.144755, -0.040330, 143.734621, -5.557579, -1.390309]
