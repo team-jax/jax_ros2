@@ -1,0 +1,8 @@
+# ROS 2 Jazzy (= the robot laptop) for building and vcan-testing jax_ros2 on a PC without ROS.
+#   tools/docker/run_tests.sh
+FROM ros:jazzy
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        can-utils python3-can python3-numpy python3-colcon-common-extensions iproute2 util-linux \
+        ros-jazzy-std-srvs \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /ws

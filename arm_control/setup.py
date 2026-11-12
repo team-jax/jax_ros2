@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import setup
 
 package_name = "arm_control"
@@ -9,7 +11,8 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml", "calibration.json"]),
-        ("share/" + package_name + "/launch", ["launch/arm.launch.py"]),
+        ("share/" + package_name + "/launch", ["launch/arm.launch.py", "launch/approach.launch.py"]),
+        ("share/" + package_name + "/model", glob("model/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -23,6 +26,7 @@ setup(
             "calibrate = arm_control.calibrate:main",
             "play_trajectory = arm_control.play:main",
             "pick_place = arm_control.pick_place:main",
+            "approach_node = arm_control.approach_node:main",
         ],
     },
 )
