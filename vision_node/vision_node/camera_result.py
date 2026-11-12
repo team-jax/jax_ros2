@@ -12,7 +12,7 @@ center_cam1_m is in camera coordinates (OpenCV: x right, y down, z forward), met
 """
 import json
 import os
-from math import cos, isfinite, radians, sin
+from math import cos, dist, isfinite, radians, sin
 
 
 def numbers(v, n):
@@ -61,15 +61,52 @@ def reject_reason(o, cube_labels, cube_dim_mm, depth_range_m):
     return None
 
 
-def select_cube(raw, cube_dim_mm, depth_range_m, cube_labels=DEFAULT_LABELS):
+def score_candidate(dims, cube_dim_mm, weights=(1.0, 1.0)):
+    """Score in [0, 1] of a candidate with dims_mm[0], dims_mm[1] = dims (both inside cube_dim_mm):
+
+        squareness = 1 - |w - h| / max(w, h)                      (1 = w equals h)
+        centrality = 1 - mean(|w - c|, |h - c|) / half            (c = middle, half = half width of cube_dim_mm; 1 = both in the middle)
+        score      = (weights[0] * squareness + weights[1] * centrality) / (weights[0] + weights[1])
+
+    Hand example, cube_dim_mm [40, 80] (c 60, half 20), 50 x 40: squareness 1 - 10/50 = 0.8,
+    centrality 1 - mean(10, 20)/20 = 0.25, equal weights -> 0.525."""
+    w, h = dims[0], dims[1]
+    square = 1.0 - abs(w - h) / max(w, h)
+    c = (cube_dim_mm[0] + cube_dim_mm[1]) / 2.0
+    half = (cube_dim_mm[1] - cube_dim_mm[0]) / 2.0
+    central = 1.0 - ((abs(w - c) + abs(h - c)) / 2.0) / half if half > 0 else 1.0
+    return (weights[0] * square + weights[1] * max(0.0, central)) / (weights[0] + weights[1])
+
+
+AXES = ("x", "y", "z")
+
+
+def work_reject_reason(p, work):
+    """None if the robot-frame position p is inside work = (x_range, y_range, z_range) (each None or
+    (min, max), inclusive), else why not."""
+    for name, v, r in zip(AXES, p, work):
+        if r is not None and not r[0] <= v <= r[1]:
+            return f"robot {name} {v:.3f} outside work_{name}_m {[r[0], r[1]]}"
+    return None
+
+
+def select_cube(raw, cube_dim_mm, depth_range_m, cube_labels=DEFAULT_LABELS, c2r=None, work=(None, None, None),
+                weights=(1.0, 1.0), min_margin=0.05, prev=None, track_tol_m=0.03):
     """Chooses the cube in the file content `raw` (bytes or str).
 
     Candidate: label in cube_labels ("*" in it allows every label; COCO/YOLO may call the cube "kite"),
-    status "ok", dims_mm[0] and dims_mm[1] both inside cube_dim_mm
-    (inclusive), depth_rect_m inside depth_range_m (inclusive). Exactly one candidate is needed;
-    with none or several nothing is chosen (never pick "some" cube).
-    Returns ({"xyz": (x, y, z) camera metres, "yaw_deg": camera-referenced yaw, "instance": n}, None)
-    or (None, reason)."""
+    status "ok", dims_mm[0] and dims_mm[1] both inside cube_dim_mm (inclusive), depth_rect_m inside
+    depth_range_m (inclusive), a valid center_cam1_m and rotation.yaw_deg. Then:
+      1. work zone: only when c2r (camera_to_robot, 6 numbers) is given, a candidate whose robot position
+         is outside work (x, y, z ranges, None = no limit) is dropped; without c2r the zone is not applied.
+      2. previous choice: prev = last published position (in the published frame: robot if c2r else
+         camera). A candidate within track_tol_m (metres) of it wins (the nearest one), so the choice
+         does not jump between frames; no margin check then.
+      3. otherwise the candidates are ranked by score_candidate; with one candidate that is the cube;
+         with more, the best one only if its score exceeds the second's by at least min_margin, else
+         nothing ("ambiguous": scores and positions in the reason).
+    Returns ({"xyz": camera metres, "pos": position in the published frame, "yaw_deg": camera-referenced
+    yaw, "instance": n, "score": s, "tracked": bool, "dropped": [work-zone reasons]}, None) or (None, reason)."""
     try:
         data = json.loads(raw)
     except ValueError as e:          # JSONDecodeError, and UnicodeDecodeError for bad bytes: both ValueError
@@ -78,24 +115,43 @@ def select_cube(raw, cube_dim_mm, depth_range_m, cube_labels=DEFAULT_LABELS):
     if not isinstance(objects, dict):
         return None, "no 'objects' dict in the file"
     rows = [o for lst in objects.values() if isinstance(lst, list) for o in lst if isinstance(o, dict)]
-    cands, dropped = [], []
+    cands, dropped, work_dropped = [], [], []
     for o in rows:
         why = reject_reason(o, cube_labels, cube_dim_mm, depth_range_m)
+        xyz = numbers(o.get("center_cam1_m"), 3)
+        rot = o.get("rotation")
+        yaw = rot.get("yaw_deg") if isinstance(rot, dict) else None
+        if why is None and (xyz is None or not isinstance(yaw, (int, float)) or isinstance(yaw, bool)
+                            or not isfinite(yaw)):
+            why = "center_cam1_m / rotation.yaw_deg invalid"
         if why is None:
-            cands.append(o)
-        else:
+            pos = camera_to_robot(xyz, c2r) if c2r else xyz
+            if c2r:
+                why = work_reject_reason(pos, work)
+                if why is not None:
+                    work_dropped.append(f"instance {o.get('instance')}: {why}")
+        if why is not None:
             dropped.append(f"instance {o.get('instance')}: {why}")
+            continue
+        cands.append({"xyz": xyz, "pos": pos, "yaw_deg": float(yaw), "instance": o.get("instance"),
+                      "score": score_candidate(numbers(o.get("dims_mm"), 3), cube_dim_mm, weights),
+                      "tracked": False, "dropped": work_dropped})
     if len(cands) == 0:
         return None, f"no cube candidate among {len(rows)} objects" + (": " + "; ".join(dropped) if dropped else "")
-    if len(cands) > 1:
-        return None, f"{len(cands)} cube candidates (instances {[c.get('instance') for c in cands]}): ambiguous"
-    c = cands[0]
-    xyz = numbers(c.get("center_cam1_m"), 3)
-    rot = c.get("rotation")
-    yaw = rot.get("yaw_deg") if isinstance(rot, dict) else None
-    if xyz is None or not isinstance(yaw, (int, float)) or isinstance(yaw, bool) or not isfinite(yaw):
-        return None, f"candidate instance {c.get('instance')} has no valid center_cam1_m / rotation.yaw_deg"
-    return {"xyz": xyz, "yaw_deg": float(yaw), "instance": c.get("instance")}, None
+    if prev is not None:
+        near = [(dist(c["pos"], prev), c) for c in cands]
+        near = [t for t in near if t[0] <= track_tol_m]
+        if near:
+            best = min(near, key=lambda t: t[0])[1]
+            best["tracked"] = True
+            return best, None
+    cands.sort(key=lambda c: -c["score"])
+    if len(cands) > 1 and cands[0]["score"] - cands[1]["score"] < min_margin:
+        a, b = cands[0], cands[1]
+        return None, (f"ambiguous: {len(cands)} cube candidates, 1st instance {a['instance']} score {a['score']:.3f} at "
+                      f"{tuple(round(v, 3) for v in a['pos'])}, 2nd instance {b['instance']} score {b['score']:.3f} at "
+                      f"{tuple(round(v, 3) for v in b['pos'])}: margin {a['score'] - b['score']:.3f} < min_margin {min_margin:g}")
+    return cands[0], None
 
 
 def camera_to_robot(p_cam, params):

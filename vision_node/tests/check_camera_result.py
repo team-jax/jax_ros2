@@ -14,7 +14,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from vision_node.camera_result import camera_to_robot, read_result, select_cube  # noqa: E402
+from vision_node.camera_result import camera_to_robot, read_result, score_candidate, select_cube  # noqa: E402
 
 failures = []
 
@@ -141,6 +141,92 @@ check("reason: label of instance 3", "instance 3: label 'person' not in cube_lab
 check("reason: status of instance 4", "instance 4: status 'bad' is not 'ok'" in why, why)
 check("reason: depth of instance 5", "instance 5: depth_rect_m 2 outside depth_range_m [0.3, 1.0]" in why, why)
 check("reason: dims of instance 6", "instance 6: dims_mm 30x55.5 outside" in why, why)
+
+# ---- work zone, score, margin, previous choice -------------------------------------------------
+# score by hand, cube_dim_mm [40, 80] (c = 60, half = 20), equal weights:
+#   50 x 40: squareness 1 - 10/50 = 0.8, centrality 1 - mean(10, 20)/20 = 0.25 -> (0.8 + 0.25)/2 = 0.525
+#   60 x 60: 1, 1 -> 1.0;  40 x 40: squareness 1, centrality 1 - 20/20 = 0 -> 0.5
+#   weights (3, 1) on 50 x 40: (3*0.8 + 0.25)/4 = 0.6625
+check("score 50x40 by hand = 0.525", abs(score_candidate((50, 40, 3), DIM) - 0.525) < 1e-12, score_candidate((50, 40, 3), DIM))
+check("score 60x60 = 1.0", score_candidate((60, 60, 3), DIM) == 1.0)
+check("score 40x40 = 0.5", abs(score_candidate((40, 40, 3), DIM) - 0.5) < 1e-12)
+check("score 50x40 with weights (3, 1) = 0.6625", abs(score_candidate((50, 40, 3), DIM, (3, 1)) - 0.6625) < 1e-12)
+
+C2R = (0, 0, 0, 0, 0, 90)        # Rz(90): camera (a, b, c) -> robot (-b, a, c)
+WORK = ((-0.2, 0.2), (-0.3, 0.3), (0.0, 0.6))
+at = lambda instance, c, **kw: cube(instance, center_cam1_m=list(c), **kw)    # noqa: E731
+
+
+def sel(*objs, **kw):
+    kw.setdefault("c2r", C2R)
+    kw.setdefault("work", WORK)
+    return select_cube(doc(*objs), DIM, DEPTH, **kw)
+
+
+# (a) one cube
+pick, why = sel(at(1, (0.0715, 0.0906, 0.4457)))
+check("(a) one cube: published, position in robot frame by hand (-0.0906, 0.0715, 0.4457)",
+      pick is not None and all(abs(u - v) < 1e-9 for u, v in zip(pick["pos"], (-0.0906, 0.0715, 0.4457))), (pick, why))
+check("(a) one cube: xyz stays the camera value, no margin check, nothing dropped",
+      pick["xyz"] == (0.0715, 0.0906, 0.4457) and pick["dropped"] == [] and not pick["tracked"])
+# (b) cube + object outside the zone: robot x = -b; b = 0.5 -> x -0.5 (outside [-0.2, 0.2])
+pick, why = sel(at(1, (0.0715, 0.0906, 0.4457)), at(2, (0.1, 0.5, 0.4457)))
+check("(b) object outside the zone is dropped, the cube is chosen", pick is not None and pick["instance"] == 1, (pick, why))
+check("(b) drop reason is reported", pick and pick["dropped"] == ["instance 2: robot x -0.500 outside work_x_m [-0.2, 0.2]"], pick and pick["dropped"])
+pick, why = sel(at(2, (0.1, 0.5, 0.4457)))
+check("(b) only an outside object: nothing, reason names x and the zone",
+      pick is None and "robot x -0.500 outside work_x_m [-0.2, 0.2]" in why, why)
+pick, why = sel(at(1, (0.0715, 0.0906, 0.4457)), work=(None, (0.0, 0.05), None))
+check("work_y_m [0, 0.05]: robot y = 0.0715 outside -> dropped (only y active)", pick is None and "work_y_m [0.0, 0.05]" in why, why)
+pick, why = sel(at(1, (0.0715, 0.0906, 0.9)), work=(None, None, (0.0, 0.6)))
+check("work_z_m [0, 0.6]: z 0.9 outside -> dropped", pick is None and "robot z 0.900 outside work_z_m" in why, why)
+pick, why = sel(at(1, (0.0, 0.2, 0.6)))
+check("zone edges are inclusive (x -0.2, z 0.6)", pick is not None, why)
+# (e) camera_to_robot empty: the zone is not applied, position stays camera
+pick, why = sel(at(1, (5.0, 5.0, 0.5)), c2r=None)
+check("(e) no camera_to_robot: zone not applied, pos = camera xyz", pick is not None and pick["pos"] == (5.0, 5.0, 0.5), (pick, why))
+
+# (c) cube + a second object of similar size: margin stops it
+sq, sq2 = (60.3, 55.5, 2.8), (58.0, 57.0, 2.8)        # by hand: 60.3x55.5 -> (0.920398 + 0.88)/2 = 0.9002; 58x57 -> (0.982759 + 0.875)/2 = 0.9293; margin 0.0291
+pick, why = sel(at(1, (0.0715, 0.0906, 0.4457), dims_mm=list(sq)), at(2, (0.0, 0.15, 0.4457), dims_mm=list(sq2)))
+check("(c) similar second object: nothing published, ambiguous with both scores and positions",
+      pick is None and why.startswith("ambiguous:") and "1st instance 2 score 0.929" in why
+      and "2nd instance 1 score 0.900" in why and "(-0.15, 0.0, 0.446)" in why, why)
+pick, why = sel(at(1, (0.0715, 0.0906, 0.4457), dims_mm=list(sq)), at(2, (0.0, 0.15, 0.4457), dims_mm=list(sq2)),
+                min_margin=0.02)
+check("(c) margin 0.0291 >= 0.02: the better one is chosen", pick is not None and pick["instance"] == 2, why)
+# clear winner: 60x60 (1.0) vs 50x40 (0.525): margin 0.475 < 0.5 -> ambiguous at 0.5, chosen at 0.4
+pick, why = sel(at(1, (0.0, 0.1, 0.45), dims_mm=[60, 60, 3]), at(2, (0.0, -0.1, 0.45), dims_mm=[50, 40, 3]), min_margin=0.4)
+check("clear winner (1.0 vs 0.525, min_margin 0.4): chosen", pick is not None and pick["instance"] == 1, why)
+pick, why = sel(at(1, (0.0, 0.1, 0.45), dims_mm=[60, 60, 3]), at(2, (0.0, -0.1, 0.45), dims_mm=[50, 40, 3]), min_margin=0.5)
+check("clear winner but min_margin 0.5 > 0.475: ambiguous", pick is None and "ambiguous" in why, why)
+
+# (d) two candidates take turns being first; the previous choice keeps the pick steady
+A, B = (0.0, 0.10, 0.45), (0.0, -0.10, 0.45)         # camera -> robot (-0.10, 0.0) and (0.10, 0.0): 0.2 m apart
+seq = [(([60, 60, 3]), ([50, 40, 3])),                # A 1.0, B 0.525: A clear
+       (([57, 59, 3]), ([58, 58, 3])),                # A ~0.97, B ~0.97: margin tiny
+       (([50, 45, 3]), ([60, 59, 3])),                # B clearly better now
+       (([60, 60, 3]), ([60, 59, 3]))]                # tiny margin again
+prev, picked = None, []
+for da, db in seq:
+    pick, why = sel(at(1, A, dims_mm=list(da)), at(2, B, dims_mm=list(db)), prev=prev, min_margin=0.05)
+    picked.append(pick["instance"] if pick else None)
+    if pick:
+        prev = pick["pos"]
+check("(d) without prev frame 2 would be ambiguous", sel(at(1, A, dims_mm=[57, 59, 3]), at(2, B, dims_mm=[58, 58, 3]))[0] is None)
+check("(d) without prev frame 3 would flip to instance 2", sel(at(1, A, dims_mm=[50, 45, 3]), at(2, B, dims_mm=[60, 59, 3]))[0]["instance"] == 2)
+check("(d) with prev: 1, 1, 1, 1 (no jumping)", picked == [1, 1, 1, 1], picked)
+pick, why = sel(at(1, (0.0, 0.1005, 0.45), dims_mm=[50, 45, 3]), at(2, B, dims_mm=[60, 59, 3]), prev=(-0.10, 0.0, 0.45))
+check("(d) tracked flag set, position moved 0.5 mm still follows", pick["instance"] == 1 and pick["tracked"], pick)
+pick, why = sel(at(1, A, dims_mm=[50, 45, 3]), at(2, B, dims_mm=[60, 59, 3]), prev=(-0.10, 0.05, 0.45), track_tol_m=0.03)
+check("(d) prev 0.05 m away (> track_tol_m 0.03): not followed, best score wins", pick["instance"] == 2 and not pick["tracked"], pick)
+pick, why = sel(at(1, A, dims_mm=[50, 45, 3]), at(2, B, dims_mm=[60, 59, 3]), prev=(-0.10, 0.05, 0.45), track_tol_m=0.06)
+check("(d) same prev with track_tol_m 0.06: followed", pick["instance"] == 1 and pick["tracked"], pick)
+pick, why = sel(at(2, B, dims_mm=[60, 59, 3]), prev=(-0.10, 0.0, 0.45))
+check("(d) the previous object is gone: the remaining one is chosen", pick is not None and pick["instance"] == 2)
+pick, why = sel(at(1, (0.0, 0.1, 0.45)), at(2, (0.0, 0.1, 0.45)), prev=None)
+check("two candidates with identical score: ambiguous (default min_margin 0.05)", pick is None and "ambiguous" in why, why)
+
 
 print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
