@@ -149,8 +149,8 @@ def select_cube(raw, cube_dim_mm, depth_range_m, cube_labels=DEFAULT_LABELS, c2r
     if len(cands) > 1 and cands[0]["score"] - cands[1]["score"] < min_margin:
         a, b = cands[0], cands[1]
         return None, (f"ambiguous: {len(cands)} cube candidates, 1st instance {a['instance']} score {a['score']:.3f} at "
-                      f"{tuple(round(v, 3) for v in a['pos'])}, 2nd instance {b['instance']} score {b['score']:.3f} at "
-                      f"{tuple(round(v, 3) for v in b['pos'])}: margin {a['score'] - b['score']:.3f} < min_margin {min_margin:g}")
+                      f"{tuple(round(v, 3) + 0.0 for v in a["pos"])}, 2nd instance {b['instance']} score {b['score']:.3f} at "
+                      f"{tuple(round(v, 3) + 0.0 for v in b["pos"])}: margin {a['score'] - b['score']:.3f} < min_margin {min_margin:g}")
     return cands[0], None
 
 

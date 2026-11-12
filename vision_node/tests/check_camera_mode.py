@@ -176,6 +176,60 @@ def main():
     check("integer parameters accepted (depth_range_m [1, 1] excludes the cube -> nothing, no error)",
           len(r.got) == 0 and "ERROR" not in log and "no cube candidate" in log, log[-200:])
 
+    # --- 6. work zone, margin, previous choice (camera_to_robot Rz(90): camera (a, b, c) -> robot (-b, a, c))
+    C2R = "camera_to_robot:=[0.0, 0.0, 0.0, 0.0, 0.0, 90.0]"
+    A, B, FAR = (0.0, 0.10, 0.45), (0.0, -0.10, 0.45), (0.1, 0.5, 0.45)    # robot x -0.10, +0.10, -0.50
+    write(p, obj(1, center=A), obj(2, center=FAR))
+    r = Run(node, f"result_json:={p}", C2R, "work_x_m:=[-0.2, 0.2]")
+    r.spin(2.5)
+    log = r.stop()
+    got = [(round(m.pose.position.x, 9), round(m.pose.position.y, 9)) for _, m in r.got]
+    check("zone: cube + object at robot x -0.5 -> only the cube published (-0.10, 0.0)", got == [(-0.1, 0.0)], got)
+    check("zone: drop reason in the log", "work zone dropped: instance 2: robot x -0.500 outside work_x_m [-0.2, 0.2]" in log, log[-300:])
+    write(p, obj(1, center=A, dims=(57, 59, 3)), obj(2, center=B, dims=(58, 58, 3)))
+    r = Run(node, f"result_json:={p}", C2R, "work_x_m:=[-0.2, 0.2]")
+    r.spin(2.5)
+    log = r.stop()
+    check("margin: two similar candidates in the zone -> nothing published", len(r.got) == 0, len(r.got))
+    check("margin: log has 'ambiguous: ' with both scores and positions",
+          "ambiguous: 2 cube candidates, 1st instance 2 score 0.950 at (0.1, 0.0, 0.45)" in log and "2nd instance 1 score 0.933 at (-0.1, 0.0, 0.45)" in log, log[-400:])
+    # (by hand: 58x58 -> (1 + 0.9)/2 = 0.950; 57x59 -> (0.9661 + 0.9)/2 = 0.933)
+    # previous choice: A alone, then A and B nearly equal (would be ambiguous), then B clearly better (still A)
+    write(p, obj(1, center=A, dims=(60, 60, 3)))
+    r = Run(node, f"result_json:={p}", C2R)
+    r.spin(1.5)
+    write(p, obj(1, center=A, dims=(57, 59, 3)), obj(2, center=B, dims=(58, 58, 3)))
+    r.spin(1.5)
+    write(p, obj(1, center=(0.0, 0.1004, 0.45), dims=(50, 45, 3)), obj(2, center=B, dims=(60, 59, 3)))
+    r.spin(1.5)
+    xs = [round(m.pose.position.x, 4) for _, m in r.got]
+    check("tracking: A, A again (margin tiny), A again (B better): robot x -0.1 three times", xs == [-0.1, -0.1, -0.1004 + 0.0], xs)
+    write(p, obj(1, center=A, dims=(50, 45, 3)), obj(2, center=B, dims=(60, 59, 3)))
+    r.spin(1.5)
+    check("tracking: A still followed", len(r.got) == 4 and round(r.got[-1][1].pose.position.x, 4) == -0.1, len(r.got))
+    write(p, raw='{"objects": {"seg": []}}')
+    r.spin(4.0)                # prev (A) is older than 3 s now
+    n = len(r.got)
+    write(p, obj(1, center=A, dims=(57, 59, 3)), obj(2, center=B, dims=(58, 58, 3)))
+    r.spin(1.5)
+    check("tracking: previous position forgotten after 3 s -> similar candidates are ambiguous again", len(r.got) == n, len(r.got) - n)
+    r.stop()
+    # zone set, camera_to_robot empty: not applied, one warning, camera frame
+    write(p, obj(1, center=FAR))
+    r = Run(node, f"result_json:={p}", "work_x_m:=[-0.2, 0.2]")
+    r.spin(2.5)
+    log = r.stop()
+    check("no camera_to_robot + zone: warned once, not applied (object far outside still published, camera frame)",
+          log.count("zone is NOT applied") == 1 and len(r.got) == 1 and r.got[0][1].header.frame_id == "camera",
+          (log.count("zone is NOT applied"), len(r.got)))
+    for bad in ("work_x_m:=[0.5, 0.1]", "work_y_m:=[1.0]", "score_weights:=[0.0, 0.0]", "score_weights:=[-1.0, 2.0]",
+                "min_margin:=-0.1", "track_tol_m:=-1.0"):
+        write(p, obj(), NOISE)
+        r = Run(node, f"result_json:={p}", bad)
+        r.spin(2.0)
+        log = r.stop()
+        check(f"{bad}: nothing published, error logged", len(r.got) == 0 and r.publishers == 0 and "ERROR" in log)
+
     node.destroy_node()
     rclpy.shutdown()
     print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
