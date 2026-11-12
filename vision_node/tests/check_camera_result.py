@@ -228,17 +228,18 @@ pick, why = sel(at(1, (0.0, 0.1, 0.45)), at(2, (0.0, 0.1, 0.45)), prev=None)
 check("two candidates with identical score: ambiguous (default min_margin 0.05)", pick is None and "ambiguous" in why, why)
 
 
-# ---- fixed top-down mount (config/camera.yaml): R = diag(-1, 1, -1) = Rz(180)·Rx(180), t = lens position
-MOUNT = (-0.045, -0.335, -0.027, 180.0, 0.0, 180.0)
-for name, p, want in (("cam (0,0,0.45) -> straight below the lens on the table", (0, 0, 0.45), (-0.045, -0.335, -0.477)),
-                      ("cam x +0.1 -> robot x -0.1 (image right = robot right)", (0.1, 0, 0.45), (-0.145, -0.335, -0.477)),
-                      ("cam y +0.1 (image down) -> robot y +0.1 (back)", (0, 0.1, 0.45), (-0.045, -0.235, -0.477))):
+# ---- fixed mount (config/camera.yaml): phone upside down, 45 deg down, lens 17.4 cm in front, 14.6 cm right, 1.6 cm above the shoulder roll axis
+MOUNT = (-0.146, -0.174, 0.016, 135.129, 0.988, 0.992)
+for name, p, want in (("cam (0,0,0.45) on the optical axis", (0, 0, 0.45), (-0.146, -0.4915, -0.3029)),
+                      ("cam (0.1,0,0.45)", (0.1, 0, 0.45), (-0.046, -0.4898, -0.3046)),
+                      ("cam (0,0.1,0.45)", (0, 0.1, 0.45), (-0.1436, -0.5624, -0.2323))):
     got = camera_to_robot(p, MOUNT)
-    check(f"mount: {name}", near(got, want), tuple(round(v, 9) for v in got))
-pick, why = select_cube(doc(cube(center_cam1_m=[0.0, 0.0, 0.425], depth_rect_m=0.425)), DIM, DEPTH, c2r=MOUNT,
-                        work=(None, None, (-0.5, -0.4)))
-check("mount: cube centre depth 0.425 passes depth_range_m [0.3, 1.0] and work_z [-0.5, -0.4] (z = -0.452)",
-      pick is not None and abs(pick["pos"][2] + 0.452) < 1e-9, (pick, why))
+    check(f"mount: {name} (given by the user, within 1e-3)", all(abs(a - b) < 1e-3 for a, b in zip(got, want)),
+          tuple(round(v, 5) for v in got))
+# on the optical axis the table (z about -0.4525) is hit at depth (0.016 + 0.4525) / 0.7084 = 0.661 m
+pick, why = select_cube(doc(cube(center_cam1_m=[0.0, 0.0, 0.661], depth_rect_m=0.661)), DIM, DEPTH, c2r=MOUNT)
+check("mount: cube on the axis at depth 0.661 passes depth_range_m [0.3, 1.0], robot z about -0.4525",
+      pick is not None and abs(pick["pos"][2] + 0.4525) < 2e-3, (pick, why))
 
 print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
