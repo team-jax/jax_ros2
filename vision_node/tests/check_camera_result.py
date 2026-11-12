@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory() as d:
     check("fresh file is read", raw == good.encode() and why is None, why)
     os.utime(p, (now - 10, now - 10))
     raw, why = read_result(p, now, 3.0)
-    check("10 s old file with max_age_s 3: not used", raw is None and "old" in why, why)
+    check("10 s old file with max_age_s 3: not used (reason has no changing number)", raw is None and "stale" in why, why)
     os.utime(p, (now - 2.9, now - 2.9))
     check("2.9 s old file with max_age_s 3: used", read_result(p, now, 3.0)[0] is not None)
 

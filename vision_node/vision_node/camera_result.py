@@ -33,9 +33,8 @@ def read_result(path, now, max_age_s):
             mtime = os.fstat(f.fileno()).st_mtime
     except OSError as e:
         return None, f"cannot read {path}: {e.strerror or e}"
-    age = now - mtime
-    if age > max_age_s:
-        return None, f"{path} is {age:.1f} s old (max_age_s {max_age_s:g}): not used"
+    if now - mtime > max_age_s:      # no age in the text: the node logs a changed reason at once, the same one rarely
+        return None, f"{path} was not modified within max_age_s {max_age_s:g} s: not used (stale)"
     return raw, None
 
 
