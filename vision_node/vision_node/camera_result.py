@@ -12,10 +12,10 @@ center_cam1_m is in camera coordinates (OpenCV: x right, y down, z forward), met
 """
 import json
 import os
-from math import isfinite
+from math import cos, isfinite, radians, sin
 
 
-def _numbers(v, n):
+def numbers(v, n):
     """v as a tuple of n finite floats, or None."""
     if (isinstance(v, (list, tuple)) and len(v) == n
             and all(isinstance(a, (int, float)) and not isinstance(a, bool) and isfinite(a) for a in v)):
@@ -59,7 +59,7 @@ def select_cube(raw, cube_dim_mm, depth_range_m):
     lo_z, hi_z = depth_range_m
     cands = []
     for o in rows:
-        dims = _numbers(o.get("dims_mm"), 3)
+        dims = numbers(o.get("dims_mm"), 3)
         depth = o.get("depth_rect_m")
         if (o.get("label") == "blob" and o.get("status") == "ok" and dims is not None
                 and lo_d <= dims[0] <= hi_d and lo_d <= dims[1] <= hi_d
@@ -70,9 +70,28 @@ def select_cube(raw, cube_dim_mm, depth_range_m):
     if len(cands) > 1:
         return None, f"{len(cands)} cube candidates (instances {[c.get('instance') for c in cands]}): ambiguous"
     c = cands[0]
-    xyz = _numbers(c.get("center_cam1_m"), 3)
+    xyz = numbers(c.get("center_cam1_m"), 3)
     rot = c.get("rotation")
     yaw = rot.get("yaw_deg") if isinstance(rot, dict) else None
     if xyz is None or not isinstance(yaw, (int, float)) or isinstance(yaw, bool) or not isfinite(yaw):
         return None, f"candidate instance {c.get('instance')} has no valid center_cam1_m / rotation.yaw_deg"
     return {"xyz": xyz, "yaw_deg": float(yaw), "instance": c.get("instance")}, None
+
+
+def camera_to_robot(p_cam, params):
+    """TEMPORARY camera -> robot transform: p_robot = R · p_cam + t.
+
+    params = (tx, ty, tz, roll_deg, pitch_deg, yaw_deg); t in metres. R = Rz(yaw) · Ry(pitch) · Rx(roll)
+    (fixed axes, roll about x first, then pitch about y, then yaw about z; each a right-handed rotation
+    of the point, positive = counter-clockwise looking against the axis; same as ROS rpy). Hand-checked
+    examples are in tests/check_camera_result.py. The robot frame is the one of /object_pose.
+    """
+    tx, ty, tz, roll, pitch, yaw = params
+    cr, sr = cos(radians(roll)), sin(radians(roll))
+    cp, sp = cos(radians(pitch)), sin(radians(pitch))
+    cy, sy = cos(radians(yaw)), sin(radians(yaw))
+    x, y, z = p_cam
+    y, z = cr * y - sr * z, sr * y + cr * z          # Rx(roll)
+    x, z = cp * x + sp * z, -sp * x + cp * z         # Ry(pitch)
+    x, y = cy * x - sy * y, sy * x + cy * y          # Rz(yaw)
+    return (x + tx, y + ty, z + tz)

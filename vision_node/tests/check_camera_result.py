@@ -14,7 +14,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from vision_node.camera_result import read_result, select_cube  # noqa: E402
+from vision_node.camera_result import camera_to_robot, read_result, select_cube  # noqa: E402
 
 failures = []
 
@@ -98,6 +98,28 @@ with tempfile.TemporaryDirectory() as d:
     check("10 s old file with max_age_s 3: not used", raw is None and "old" in why, why)
     os.utime(p, (now - 2.9, now - 2.9))
     check("2.9 s old file with max_age_s 3: used", read_result(p, now, 3.0)[0] is not None)
+
+
+def near(a, b):
+    return len(a) == len(b) and all(abs(x - y) < 1e-9 for x, y in zip(a, b))
+
+
+# camera_to_robot: expected values calculated by hand (R = Rz(yaw)·Ry(pitch)·Rx(roll), then + t)
+for name, p, par, want in (
+        ("all zero: input unchanged", (0.1, 0.2, 0.3), (0, 0, 0, 0, 0, 0), (0.1, 0.2, 0.3)),
+        ("translation only", (1, 2, 3), (10, 20, 30, 0, 0, 0), (11, 22, 33)),
+        ("yaw 90, t=[1,0,0], p=[1,0,0]: Rz·p=[0,1,0], +t", (1, 0, 0), (1, 0, 0, 0, 0, 90), (1, 1, 0)),
+        ("roll 90 about x: [0,1,0] -> [0,0,1]", (0, 1, 0), (0, 0, 0, 90, 0, 0), (0, 0, 1)),
+        ("pitch 90 about y: [0,0,1] -> [1,0,0]", (0, 0, 1), (0, 0, 0, 0, 90, 0), (1, 0, 0)),
+        ("yaw -90: [1,0,0] -> [0,-1,0]", (1, 0, 0), (0, 0, 0, 0, 0, -90), (0, -1, 0)),
+        ("order: roll 90 then yaw 90 on [1,0,0] -> [0,1,0] (reverse order would give [0,0,1])",
+         (1, 0, 0), (0, 0, 0, 90, 0, 90), (0, 1, 0)),
+        ("all three 90, p=[1,2,3], t=[10,20,30]: Rx [1,-3,2], Ry [2,-3,-1], Rz [3,2,-1], +t",
+         (1, 2, 3), (10, 20, 30, 90, 90, 90), (13, 22, 29)),
+        ("yaw 30 on [1,0,0] -> [cos30, sin30, 0] = [0.8660254, 0.5, 0]",
+         (1, 0, 0), (0, 0, 0, 0, 0, 30), (0.8660254037844386, 0.5, 0))):
+    got = camera_to_robot(p, par)
+    check(f"transform: {name}", near(got, want), tuple(round(v, 12) for v in got))
 
 print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
