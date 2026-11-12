@@ -130,6 +130,30 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 - 2026-11-05 22:50: 사용자 지시 "대충 하고 나중에 고치자" — `PROMPT_SIM_ADAPT.md`를 임시값(D 0.50 m → 시뮬 책상 0.35, 롤 원점 0.288/z0 0.85 가정, 마찰 0.4 패드–큐브만, 큐브 50 mm/0.05 kg, 도달 칸 전체)으로 바로 진행하도록 바꿈. 전부 파라미터로 두어 나중에 교체.
 - 2026-11-06: 사용자 서보 영점 표 접수 — 서보 id/핀/타이머는 펌웨어 `servo[]`와 일치(확인함). 영점(°): 0:90, 1:0, 2:90, 3:0, 4:90, 5:0, 6:?, 7(W_X):0, 8(W_YAW):0, 9(W_PITCH):0. 손목 3개의 영점이 0°라 한쪽 방향으로만 움직임 → 부호(−1 필요)와 시뮬 IK의 손목 값 부호 확인 필요. F_ROT(6) 영점 미정. `roles/03` §6에 반영.
 
+## 2026-11-12 vision_node 카메라→로봇 좌표 현황
+
+### 완료
+- vision_node 카메라 결과 모드(`result_json`: SteroDepthSeg의 `inference.json`을 읽어 `/object_pose` 발행).
+- `cube_labels`(기본 blob·kite, `["*"]`은 전부).
+- 후보 선택 개선: 작업 구역(`work_x/y/z_m`), 점수 순위(`score_weights`), 마진(`min_margin`), 이전 선택 추적(`track_tol_m`).
+- `config/camera.yaml` + `launch/vision.launch.py`(`camera_to_robot`을 파일에서 읽어 노드에 넘김).
+- 변환 계산 도구 `solve_camera_to_robot.py`(Kabsch/SVD). 주의: 이 도구는 이 브랜치(`model-approach`)에 없고, 예전 `jax_ros` 폴더의 push 안 된 커밋(`17e62ac`)에만 있다. 합치기 전까지 이 브랜치의 `camera.yaml` 주석이 가리키는 `vision_node/tools/` 경로는 없다.
+
+### 확인된 것
+- 큐브가 작업 구역 안에 있을 때 `/object_pose`가 로봇 좌표(`shoulder_roll_axis`)로 나오고, 1~2 mm 안에서 안정적이다.
+- 멀티탭은 크기 필터(`cube_dim_mm`)로 걸러진다.
+
+### 문제
+- 독립 위치 시험에서 약 9.4 cm 어긋난다(`camera_to_robot` 값은 근거 점 3개가 줄자 측정이라 신뢰 낮음, 정확도 미확정).
+- 스테레오 책상 평면이 IMU 수평과 약 7° 어긋난다. 원인이 스테레오 깊이인지 IMU→렌즈 회전인지 미확정.
+- 점 사이 거리가 줄자와 맞지 않는다.
+
+### 다음
+1. 크기를 아는 AprilTag로 깊이 배율, 평면 기울기, 변환을 함께 확인한다.
+2. 어깨 높이 1207.5 vs 1212.5 mm는 정우와 협의한다.
+3. yaw를 로봇 기준으로 변환한다(지금은 카메라 기준 그대로).
+4. 모터 영점·부호를 실측한다.
+
 ## 2026-11-06 sim-to-real(정우) 비교 검토
 - 읽은 것: README, DEPLOYMENT_SPEC, ARCHITECTURE, deploy/{controller,run,observations,policies,trajectory}.py, sim_validation/scene.py (미확인: tests, ISAAC_COMPARISON, MODEL_VALIDATION, .pt 조회표 - JaxIsaacLab/ 는 레포에 없음)
 - 결론: MuJoCo 전용(CAN/실물 어댑터 없음), 파지 완료 미달성(DEPLOYMENT_SPEC 명시). 1단계(큐브 위 2~3cm 접근)는 기존 방침 A(IK 웨이포인트) 유지, 이쪽은 3단계 이후 후보.
