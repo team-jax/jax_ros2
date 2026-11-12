@@ -19,7 +19,7 @@ vision_node ──/object_pose──▶ arm_control ─┬─/ak45/command──
 | `stm_bridge` | `/servo/command`를 CAN 프레임으로 STM32에 보낸다. 마지막으로 보낸 각도를 `/servo/state`로 발행한다(측정값이 아님). 나중에 STM의 센서 프레임을 받아 토픽으로 올린다. | `/servo/command` | `/servo/state`, (10/29 이후) `/pressure` | 재준 | 구현, vcan 시험 완료(2026-11-07). 실물 전. `/pressure`는 아직 없음 |
 | `ak45_node` | AK45 4개(ID 0x01~0x04) 제어와 상태 발행 | `/ak45/command` | `/joint_states`, `/diagnostics` | 재준 | 6개→4개로 변경, vcan 시뮬레이터로 시험. 실물 검증은 한 대(ID 0x02)만(ID 1·3·4는 ID 설정만 했고 통신 미확인) |
 | `arm_control` | 순서 관리(집기→놓기)와 IK 계산을 한 노드에서 한다. IK 계산은 노드와 분리된 함수로 짜서 단독 시험이 가능하게 한다. | `/object_pose`, `/arm_control/joint_command`, `/joint_states` | `/ak45/command`, `/servo/command` | 재준 | 일부 구현: 시뮬 관절각 → 모터 각도 변환, 속도 제한, AK45 추종 감시, `pick_place`·`play_trajectory`·`calibrate`(SimToReal에서 이전, 같은 출력임을 숫자로 확인). `/object_pose`는 로그만 찍고 움직이지 않음. 상태머신과 IK의 노드화는 미구현 |
-| `vision_node` | 카메라 입력, 물체 탐지, 깊이 계산, 로봇 좌표계 변환까지. 카메라 영상은 `/camera/*/image_raw`로도 발행한다. [제안] | (카메라) | `/object_pose` | 재준 | 뼈대만: `fixed_pose:=[x,y,yaw]`일 때만 1 Hz로 발행(시험용), 카메라 미연결 |
+| `vision_node` | 카메라 입력, 물체 탐지, 깊이 계산, 로봇 좌표계 변환까지. 카메라 영상은 `/camera/*/image_raw`로도 발행한다. [제안] | (카메라) | `/object_pose` | 재준 | 일부 구현: `fixed_pose:=[x,y,yaw]`일 때 1 Hz 발행(시험용) 또는 `result_json`(카메라 프로그램의 `inference.json`)을 읽어 큐브 1개일 때만 발행. 파라미터: `result_json`(SteroDepthSeg `--out` 폴더의 `inference.json` 경로, 기본 빈 문자열), `poll_hz`(2), `max_age_s`(3), `cube_dim_mm`([40, 80]), `depth_range_m`([0.3, 1.0]), `camera_to_robot`([tx, ty, tz, roll_deg, pitch_deg, yaw_deg], 기본 빈 목록). `camera_to_robot`이 비면 `frame_id = camera`(카메라 좌표 그대로, OpenCV: x 오른쪽·y 아래·z 앞, **로봇 좌표 아님**), 있으면 `p_robot = R·p_cam + t`(R = Rz(yaw)·Ry(pitch)·Rx(roll))로 바꿔 `frame_id = shoulder_roll_axis`. 둘 다 **임시**(폰 고정 방법 미정). **yaw는 카메라 기준**(`rotation.yaw_deg` 그대로, 로봇 좌표 yaw로 바꾸지 않음). 실제 카메라로는 아직 시험하지 않음 |
 
 ## 3. 나중에 / 합친 것
 
@@ -33,7 +33,7 @@ vision_node ──/object_pose──▶ arm_control ─┬─/ak45/command──
 
 | 토픽 | 메시지 | 보내는 쪽 → 받는 쪽 | 비고 |
 |---|---|---|---|
-| `/object_pose` | PoseStamped, `frame_id = shoulder_roll_axis` | `vision_node` → `arm_control` | 위치 m. 원점 = 오른쪽 어깨 롤 모터 축 중심, x = 로봇 왼쪽(+), y = 뒤(+, 앞은 −), z = 위. **회전은 z축 yaw만**(쿼터니언 x·y는 0). **yaw 단위는 도(°)**(`vision_node`의 `fixed_pose:=[x, y, yaw]`, 반시계, `pick_place --cube x y yaw`와 같다. PoseStamped의 쿼터니언 자체에는 단위가 없다). **position.z는 사용하지 않는다**(`fixed_pose`에 높이가 없어 0.0). `arm_control`은 지금 로그만 찍는다(카메라 좌표 변환 없음) |
+| `/object_pose` | PoseStamped, `frame_id = shoulder_roll_axis`(카메라 모드에서 `camera_to_robot`이 비면 `camera`) | `vision_node` → `arm_control` | 위치 m. 원점 = 오른쪽 어깨 롤 모터 축 중심, x = 로봇 왼쪽(+), y = 뒤(+, 앞은 −), z = 위. **회전은 z축 yaw만**(쿼터니언 x·y는 0). **yaw 단위는 도(°)**(`vision_node`의 `fixed_pose:=[x, y, yaw]`, 반시계, `pick_place --cube x y yaw`와 같다. PoseStamped의 쿼터니언 자체에는 단위가 없다). **position.z는 사용하지 않는다**(`fixed_pose`에 높이가 없어 0.0). 카메라 모드에서는 변환한 z가 실린다. `frame_id = camera`이면 좌표는 카메라 좌표(로봇 좌표 아님), yaw는 항상 카메라 기준(로봇 좌표로 변환 전). `arm_control`은 지금 로그만 찍는다(카메라 좌표 변환 없음) |
 | `/arm_control/joint_command` | JointState, **시뮬 관절 이름**(`elbow`, `wrist_pitch` …), position = 시뮬 관절각(rad) | `pick_place`·`play_trajectory`·사람 → `arm_control` | 기존 `/sim2real/joint_command`의 새 이름. 이름·길이·NaN이 틀린 메시지는 통째로 버림 |
 | `/ak45/command` | JointState, 이름 `ak45_1..4`, position = **모터 각도(rad)** | `arm_control` → `ak45_node` | 기존 규칙. 시뮬 각도 → 모터 각도 변환은 `arm_control`(`calibration.json`)이 한다 |
 | `/servo/command` | JointState, 이름 = 서보 이름(`W_PITCH`, `F1_1` …, `calibration.json`의 `name`), position = **서보 모터 각도(rad, 0~π)** [확정, 구현·시험 2026-11-07] | `arm_control` → `stm_bridge` | 아래 이름 표 사용. `/ak45/command`와 같은 규칙("모터 각도를 rad로"). **시뮬 각도 → 모터 각도 변환(오프셋 포함)은 `arm_control`이 하고, `stm_bridge`는 프레임 송신만 한다**(기존 "단위와 오프셋은 stm_bridge에서 변환"을 바꿈). `stm_bridge`는 0~180°를 벗어난 값이 하나라도 있거나 이름·길이·NaN이 틀린 메시지를 통째로 버린다 |
@@ -78,7 +78,7 @@ vision_node ──/object_pose──▶ arm_control ─┬─/ak45/command──
 | **1** | `stm_bridge` (+ 기존 `ak45_node`) | motor_id + 각도 → 서보가 움직인다 | `ros2 topic pub`으로 손으로. 시험은 `vcan0` 먼저, STM 쪽은 `STM32_SERVO_SPEC.md` 8장 순서 | **vcan 시험 완료**(`005#090384` 등 프레임 확인). 실물(STM 보드) 시험 전 |
 | 2 | `/servo/state` 발행 (A안) | 마지막으로 보낸 각도 확인 | 위와 같음 | **구현·vcan 시험 완료** |
 | 3 | `arm_control` | 순서 관리 + 팔 IK + 파지(규칙 기반) | 물체 위치를 손으로 입력 | **일부**: 시뮬 관절각 변환·속도 제한·감시·`pick_place`·`calibrate`는 구현. 상태머신·IK 노드화·파지 함수는 미구현 |
-| 4 | `vision_node` (카메라 입력과 탐지·좌표 변환을 한 노드에서) | 카메라로 물체 위치를 얻어 `/object_pose`로 발행 | 폰/웹캠 영상 | **뼈대만**(`fixed_pose` 시험용 발행). 카메라 미연결 |
+| 4 | `vision_node` (카메라 입력과 탐지·좌표 변환을 한 노드에서) | 카메라로 물체 위치를 얻어 `/object_pose`로 발행 | 폰/웹캠 영상 | **일부**: `fixed_pose` 시험용 발행, `result_json`으로 카메라 프로그램의 `inference.json`을 읽어 발행(카메라→로봇 변환은 임시 `camera_to_robot`, yaw는 카메라 기준). 파일로만 시험, **실제 카메라 미시험**, 폰 고정 위치와 정확한 변환 미정 |
 | 5 | STM 생존 신호(B: StdId 0x107, 1초, `[seq][rx_count]` 제안), `/pressure`(10/29 이후), RL 파지, 따라하기, 주먹인사, RViz | 확장 | | 미착수 |
 
 jax_ros 통합 작업의 1~5단계(위 표의 단계와는 별개, `STATUS.md`)는 2026-11-07에 가상 CAN에서 끝났다: ① 레포 뼈대와 `ak45_can`·`ak45_ros2` 복사, AK45 4개로 변경 ② `stm_bridge` ③ `arm_control`(SimToReal의 `sim2real_node`를 쪼갬, 같은 입력에서 같은 모터 명령) ④ `vision_node` 뼈대 ⑤ `arm.launch.py`, README, 문서. **실물 시험은 아직 하지 않았다.**

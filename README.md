@@ -13,7 +13,7 @@ vision_node ─/object_pose─▶ arm_control ─┬─/ak45/command──▶ ak
 | `ak45_ros2/` | `ak45_node`: AK45 **4개**(ID 0x01~0x04) | team-jax/ak45_ros2 `5495298` (6개→4개로 변경) |
 | `stm_bridge/` | `/servo/command` → CAN_STM 서보 프레임, `/servo/state` | 새로 만듦 (SimToReal의 서보 CAN 부분) |
 | `arm_control/` | 보정, 속도 제한, 감시, 계획, 재생, 보정 CLI. `arm.launch.py` | SimToReal의 나머지 |
-| `vision_node/` | 뼈대. `fixed_pose`일 때만 `/object_pose`를 발행 | 새로 만듦 |
+| `vision_node/` | `fixed_pose`(시험용) 또는 `result_json`(카메라 프로그램의 `inference.json`)일 때만 `/object_pose`를 발행 | 새로 만듦 |
 
 각 복사본 폴더의 `SOURCE.md`에 원본 URL과 커밋 SHA가 있다. 원본 레포(`SimToReal`, `ak45_ros2`, `ak45_can`)는 건드리지 않았다.
 
@@ -26,9 +26,9 @@ vision_node ─/object_pose─▶ arm_control ─┬─/ak45/command──▶ ak
 | `/joint_states` | JointState (AK45 실측, rad) | ak45_node → 모두 | 기존 그대로 |
 | `/servo/command` | JointState, 이름 = 서보 이름(`W_PITCH`, `F1_1` … `calibration.json`의 `name`), position = **서보 모터 각도(rad, 0~π)** | arm_control → stm_bridge | `/ak45/command`와 같은 규칙. 시뮬 각도 → 모터 각도 변환은 **arm_control만** 한다 |
 | `/servo/state` | 위와 같은 형식, position = **마지막으로 보낸 값**(측정값 아님) | stm_bridge → 모두 | 서보는 피드백이 없다. `/joint_states`에 섞지 않는다 |
-| `/object_pose` | PoseStamped, `frame_id = shoulder_roll_axis`, 위치 m | vision_node → arm_control | 아래 |
+| `/object_pose` | PoseStamped, `frame_id = shoulder_roll_axis`(카메라 모드에서 `camera_to_robot`이 비면 `camera`), 위치 m | vision_node → arm_control | 아래 |
 
-`/object_pose`: 원점 = 오른쪽 어깨 롤 모터 축 중심, x = 로봇 왼쪽(+), y = 뒤(+, 앞은 −), z = 위. **회전은 z축 yaw만**(쿼터니언의 x·y는 0). 단위: `vision_node`의 `fixed_pose:=[x, y, yaw]`는 x·y가 m, **yaw가 도(°)**(반시계, `pick_place --cube x y yaw`와 같다). **position.z는 사용하지 않는다**(`fixed_pose`에 높이가 없어 0.0). `arm_control_node`는 지금 이 토픽을 로그로만 찍고 로봇을 움직이지 않는다(카메라 좌표 변환이 아직 없다).
+`/object_pose`: 원점 = 오른쪽 어깨 롤 모터 축 중심, x = 로봇 왼쪽(+), y = 뒤(+, 앞은 −), z = 위. **회전은 z축 yaw만**(쿼터니언의 x·y는 0). 단위: `vision_node`의 `fixed_pose:=[x, y, yaw]`는 x·y가 m, **yaw가 도(°)**(반시계, `pick_place --cube x y yaw`와 같다). **position.z는 사용하지 않는다**(`fixed_pose`에 높이가 없어 0.0). 카메라 모드(`result_json`)에서는 변환한 z가 실린다(`arm_control`은 쓰지 않는다). `arm_control_node`는 지금 이 토픽을 로그로만 찍고 로봇을 움직이지 않는다(카메라 좌표 변환이 아직 없다).
 
 서보 프레임: 표준 ID 5, `[motor_id 0..9][각도×10 H][L]`, 0~1800 (team-jax/CAN_STM `src/main.c`의 `CAN_SERVO_STDID 5U`). stm_bridge는 `/servo/command`에서 0~180°를 벗어난 값이 하나라도 있거나 이름·길이·NaN이 틀린 메시지를 **통째로 버린다**.
 
@@ -57,7 +57,14 @@ ros2 topic pub -t 3 -r 10 /arm_control/joint_command sensor_msgs/msg/JointState 
   "{name: ['elbow', 'wrist_pitch'], position: [0.0, 0.349]}"
 ros2 run arm_control pick_place --cube 0.10 -0.30 20 --target 0.05 -0.27 --dry-run    # 계획과 검사만
 ros2 run vision_node vision_node --ros-args -p fixed_pose:="[0.10, -0.30, 20.0]"      # 시험용 /object_pose
+ros2 run vision_node vision_node --ros-args -p result_json:=<runs 폴더>/cube_test/inference.json   # 카메라 결과(camera 프레임)
 ```
+
+### vision_node 카메라 모드 (`result_json`)
+카메라 프로그램(SteroDepthSeg, 자체 venv)은 `--out` 폴더의 `inference.json`을 약 1초마다 덮어쓴다. `vision_node`는 그 파일만 읽는다(카메라 코드·torch를 import하지 않는다).
+- 파라미터: `result_json`(SteroDepthSeg `--out` 폴더의 `inference.json` 경로, 기본 빈 문자열), `poll_hz`(2), `max_age_s`(3), `cube_dim_mm`([40, 80]), `depth_range_m`([0.3, 1.0]), `camera_to_robot`([tx, ty, tz, roll_deg, pitch_deg, yaw_deg], 기본 빈 목록). `fixed_pose`와 같이 주면 오류, 발행 없음.
+- 후보: `label == "blob"`, `status == "ok"`, `dims_mm`의 가로·세로가 `cube_dim_mm` 안, `depth_rect_m`가 `depth_range_m` 안. **정확히 1개일 때만** 발행(0개·2개 이상이면 이유만 로그). 파일 수정 시각이 `max_age_s`보다 오래됐거나 JSON이 깨졌으면 발행하지 않는다(로그). 같은 파일 내용은 다시 발행하지 않는다.
+- 좌표: `camera_to_robot`이 비면 `frame_id = camera`(카메라 좌표 그대로, OpenCV: x 오른쪽·y 아래·z 앞, **로봇 좌표 아님**), 있으면 `p_robot = R·p_cam + t`(R = Rz(yaw)·Ry(pitch)·Rx(roll))로 바꿔 `frame_id = shoulder_roll_axis`. 둘 다 **임시**(폰 고정 방법 미정). **yaw는 카메라 기준**(`rotation.yaw_deg` 그대로, 로봇 좌표 yaw로 바꾸지 않음). 이 경우 시작할 때 "임시: 카메라 좌표, 로봇 좌표 아님"을 로그로 남긴다.
 
 ### 보정 (calibrate)
 
@@ -93,6 +100,8 @@ CAN은 `vcan`으로 시험한다(`sudo modprobe vcan && sudo ip link add dev vca
 | `bash arm_control/tests/launch_vcan.sh` | `arm.launch.py` 전체(별도 네트워크 공간에 `can0`를 만들어 sudo가 필요 없다) |
 | `bash arm_control/tests/check_topics.sh` | NODES.md §4 토픽 표(타입, 발행·구독 노드, 메시지 내용)를 실행 중인 시스템과 대조 |
 | `python3 vision_node/tests/check_node.py` | `fixed_pose`가 없거나 틀리면 발행 없음, 있으면 1 Hz |
+| `python3 vision_node/tests/check_camera_result.py` | ROS 없이 `inference.json` 파싱·큐브 선택·오래된 파일·임시 변환(손계산 값) |
+| `python3 vision_node/tests/check_camera_mode.py` | `result_json` 모드 실제 `ros2 run`(파일 변경·깨진 JSON·후보 2개·오래된 파일·잘못된 파라미터) |
 
 시험 스크립트를 쓸 때 `pkill -f`·`pgrep -f` 패턴이 같은 셸 명령 본문에 들어 있으면 자기 자신이 매칭된다. 스크립트 파일로 실행한다.
 

@@ -3,7 +3,7 @@
 <package format="3">
   <name>vision_node</name>
   <version>0.1.0</version>
-  <description>Skeleton of the camera node: publishes /object_pose (PoseStamped) only from the test parameter fixed_pose. No camera yet.</description>
+  <description>Camera node: publishes /object_pose (PoseStamped) from the test parameter fixed_pose or from the camera program's inference.json (result_json). Camera code is not imported.</description>
   <maintainer email="jeajune11117@gmail.com">jeajune0221</maintainer>
   <license>TODO</license>
 

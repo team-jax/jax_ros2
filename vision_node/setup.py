@@ -14,7 +14,7 @@ setup(
     zip_safe=True,
     maintainer="jeajune0221",
     maintainer_email="jeajune11117@gmail.com",
-    description="Skeleton of the camera node: /object_pose from a fixed test pose",
+    description="Camera node: /object_pose from a fixed test pose or from the camera program inference.json",
     license="TODO",
     entry_points={
         "console_scripts": [

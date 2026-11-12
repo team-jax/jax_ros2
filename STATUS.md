@@ -58,7 +58,7 @@
 5. FSR(RA12P) 부착 위치와 Rc 시험 → ADC 6채널 DMA 설정, 센서 CAN 프레임 정의 (`roles/02_STM32_FIRMWARE_FSR.md`).
 6. 보드에 올린 펌웨어가 `servo-pwm-can` 브랜치인지 확인하고 원격에 반영.
 7. `stm_bridge` 1단계 설계 승인 후 구현: 10 Hz 재전송 여부와 `/servo/command` 메시지 타입(JointState)을 정해야 한다.
-8. `vision_node`, `arm_control` 상태머신, IK 함수.
+8. `vision_node`(카메라 결과 읽기까지 됨, 실카메라 시험·정확한 변환·yaw 변환 남음), `arm_control` 상태머신, IK 함수.
 9. 맨 끝에 대시보드 서보 패널, systemd, 주먹인사.
 
 ## 7. 사용 기술
@@ -258,6 +258,14 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 - `vision_node/vision_node.py`: 파라미터 `fixed_pose:=[x, y, yaw]`(x·y는 m, **yaw는 도(°)**: `pick_place --cube x y yaw`와 같은 단위 선택, 반시계 방향)가 있을 때만 1 Hz로 `/object_pose`(PoseStamped, `frame_id=shoulder_roll_axis`)를 발행. 회전은 z축 yaw만(`x=y=0`, `z=sin(yaw/2)`, `w=cos(yaw/2)`). `fixed_pose`에는 높이가 없어 `position.z=0.0`(의미 없음, 코드·docstring에 명시). 파라미터가 없거나 숫자 3개가 아니거나(길이 2·4, NaN, inf, 문자열) 하면 **발행자도 만들지 않고** 로그만 남긴다. 정수 목록 `[1, 2, -90]`은 숫자이므로 받는다. 카메라(SteroDepthSeg)는 연결하지 않음. `dynamic_typing`으로 선언(기본값 `[]`은 BYTE_ARRAY로 추정되어 `[0.1, -0.3, 20.0]`도 거절되던 것을 시험에서 발견해 고침).
 - 검증 `tests/check_node.py`(실제 `ros2 run`, 17개 통과): 파라미터 없음 → 4초간 0개, 발행자도 0개 / 잘못된 값 5종 → 0개 / `[0.10, -0.30, 20.0]` → 6.5초에 6개, 간격 1.0/0.999/1.0/1.0/1.0 s, `frame_id`, x·y, z=0, yaw 20.000000°, 단위 쿼터니언, stamp. `arm_control_node`의 `/object_pose` 로그 수신은 3단계에서 확인.
 - 의존성: `rclpy`, `geometry_msgs`.
+
+### 4단계 추가: vision_node가 카메라 결과 파일을 읽음 (2026-11-12)
+- 실제 `inference.json` 구조 확인(`phone_stereo/runs/cube_test`): `objects`는 목록이 아니라 `{"seg": [객체…]}`(방법 이름 → 목록). 나머지 키·단위는 지시와 같다. 코드는 방법 이름을 고정하지 않고 모든 목록을 본다.
+- `vision_node/camera_result.py`(ROS 없는 순수 함수: `read_result`, `select_cube`, `camera_to_robot`)와 `vision_node.py`의 `result_json` 모드. SteroDepthSeg 코드와 `arm_control`은 고치지 않았다. `fixed_pose` 모드는 그대로(`check_node.py` 17개 통과).
+- 파라미터: `result_json`(SteroDepthSeg `--out` 폴더의 `inference.json` 경로, 기본 빈 문자열), `poll_hz`(2), `max_age_s`(3), `cube_dim_mm`([40, 80]), `depth_range_m`([0.3, 1.0]), `camera_to_robot`([tx, ty, tz, roll_deg, pitch_deg, yaw_deg], 기본 빈 목록). `camera_to_robot`이 비면 `frame_id = camera`(카메라 좌표 그대로, OpenCV: x 오른쪽·y 아래·z 앞, **로봇 좌표 아님**), 있으면 `p_robot = R·p_cam + t`(R = Rz(yaw)·Ry(pitch)·Rx(roll))로 바꿔 `frame_id = shoulder_roll_axis`. 둘 다 **임시**(폰 고정 방법 미정). **yaw는 카메라 기준**(`rotation.yaw_deg` 그대로, 로봇 좌표 yaw로 바꾸지 않음).
+- 변환 규약: `R = Rz(yaw)·Ry(pitch)·Rx(roll)`, `p_robot = R·p + t`. 손계산 예 9개(예: yaw 90°, t=[1,0,0], p=[1,0,0] → [1,1,0]; roll 90°+yaw 90°, p=[1,0,0] → [0,1,0], 순서가 반대면 [0,0,1]; 셋 다 90°, p=[1,2,3], t=[10,20,30] → [13,22,29])와 일치.
+- 시험: `check_camera_result.py`(ROS 없음, 후보 조건 경계값·깨진 JSON 7종·오래된 파일·변환), `check_camera_mode.py`(실제 `ros2 run`, 임시 파일: 변경 시 값 바뀜, 같은 내용 중복 없음, 깨진 JSON·후보 2개·10초 묵은 파일은 발행 없이 노드 생존, 잘못된 파라미터 7종은 발행자도 없음). 시험 중 발견해 고침: 오래된 파일 경고 문구에 나이(초)가 들어 있어 2 Hz로 경고가 반복됨.
+- **하지 않은 것**: 실제 카메라로 시험(진짜 `cube_test` 파일을 1초마다 다시 쓰는 방식으로만 `ros2 topic echo` 확인), 폰 고정 위치와 정확한 카메라→로봇 값, 큐브 yaw의 로봇 좌표 변환, `arm_control`이 이 값을 쓰는 것(여전히 로그만).
 
 ### calibrate --ros 변경 (원본 SimToReal 대비, 사용자 요청)
 - **이유:** 원본은 서보 프레임을 CAN에 직접 썼지만, 쪼갠 뒤에는 `/servo/command`로 발행한다. 발행자를 만든 직후(ROS 디스커버리 전)에 보낸 메시지는 구독자에게 도착하지 않고, 서보의 첫 명령(점프)은 한 번만 가므로 **첫 명령이 사라진다.** 수정 전 코드로 재현: `j W_PITCH / m 100 / m +10`을 즉시 파이프하면 첫 프레임 `005#0903E8`이 사라지고 램프의 둘째 프레임 `005#0903EE`부터 보였다(17프레임). 사람이 천천히 입력하면 드러나지 않던 문제.
