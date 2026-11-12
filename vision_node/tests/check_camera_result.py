@@ -228,5 +228,17 @@ pick, why = sel(at(1, (0.0, 0.1, 0.45)), at(2, (0.0, 0.1, 0.45)), prev=None)
 check("two candidates with identical score: ambiguous (default min_margin 0.05)", pick is None and "ambiguous" in why, why)
 
 
+# ---- fixed top-down mount (config/camera.yaml): R = diag(-1, 1, -1) = Rz(180)·Rx(180), t = lens position
+MOUNT = (-0.045, -0.335, -0.027, 180.0, 0.0, 180.0)
+for name, p, want in (("cam (0,0,0.45) -> straight below the lens on the table", (0, 0, 0.45), (-0.045, -0.335, -0.477)),
+                      ("cam x +0.1 -> robot x -0.1 (image right = robot right)", (0.1, 0, 0.45), (-0.145, -0.335, -0.477)),
+                      ("cam y +0.1 (image down) -> robot y +0.1 (back)", (0, 0.1, 0.45), (-0.045, -0.235, -0.477))):
+    got = camera_to_robot(p, MOUNT)
+    check(f"mount: {name}", near(got, want), tuple(round(v, 9) for v in got))
+pick, why = select_cube(doc(cube(center_cam1_m=[0.0, 0.0, 0.425], depth_rect_m=0.425)), DIM, DEPTH, c2r=MOUNT,
+                        work=(None, None, (-0.5, -0.4)))
+check("mount: cube centre depth 0.425 passes depth_range_m [0.3, 1.0] and work_z [-0.5, -0.4] (z = -0.452)",
+      pick is not None and abs(pick["pos"][2] + 0.452) < 1e-9, (pick, why))
+
 print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

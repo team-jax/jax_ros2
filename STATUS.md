@@ -136,12 +136,19 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 - vision_node 카메라 결과 모드(`result_json`: SteroDepthSeg의 `inference.json`을 읽어 `/object_pose` 발행).
 - `cube_labels`(기본 blob·kite, `["*"]`은 전부).
 - 후보 선택 개선: 작업 구역(`work_x/y/z_m`), 점수 순위(`score_weights`), 마진(`min_margin`), 이전 선택 추적(`track_tol_m`).
-- `config/camera.yaml` + `launch/vision.launch.py`(`camera_to_robot`을 파일에서 읽어 노드에 넘김).
+- `config/camera.yaml` + `launch/vision.launch.py`(`camera_to_robot`을 파일에서 읽어 노드에 넘김). 값은 아래 '카메라 고정 장착 방식으로 전환'의 계산식 값.
 - 변환 계산 도구 `solve_camera_to_robot.py`(Kabsch/SVD). 주의: 이 도구는 이 브랜치(`model-approach`)에 없고, 예전 `jax_ros` 폴더의 push 안 된 커밋(`17e62ac`)에만 있다. 합치기 전까지 이 브랜치의 `camera.yaml` 주석이 가리키는 `vision_node/tools/` 경로는 없다.
 
 ### 확인된 것
 - 큐브가 작업 구역 안에 있을 때 `/object_pose`가 로봇 좌표(`shoulder_roll_axis`)로 나오고, 1~2 mm 안에서 안정적이다.
 - 멀티탭은 크기 필터(`cube_dim_mm`)로 걸러진다.
+
+### 카메라 고정 장착 방식으로 전환 (2026-11-12)
+- **카메라 고정 장착 방식으로 전환, 이전 손 측정 방식 폐기(9.4 cm 오차, 측정 불일치).** 손으로 큐브를 재는 캘리브레이션은 중단.
+- 가정: 카메라를 책상 위에 수직(위에서 아래로) 고정. 렌즈 위치(로봇 좌표) (-0.045, -0.335, -0.027) m(작업영역 중앙 위, 책상 위 45 cm, 책상면 z = -0.477 m). 광축 수직 아래, 이미지 위쪽 = 로봇 앞쪽(-y).
+- `camera_to_robot` = `[-0.045, -0.335, -0.027, 180.0, 0.0, 180.0]`(tx, ty, tz m, roll, pitch, yaw deg; R = Rz·Ry·Rx 규약, `camera_result.py`에서 읽어 확인). R = Rz(180)·Rx(180) = diag(-1, 1, -1). `camera.yaml`, README, NODES.md와 같은 값.
+- 코드 함수로 확인한 점: cam (0,0,0.45) → (-0.045,-0.335,-0.477), (0.1,0,0.45) → (-0.145,-0.335,-0.477), (0,0.1,0.45) → (-0.045,-0.235,-0.477) 모두 일치(`check_camera_result.py`에 포함). 큐브 중심 깊이 0.425 m → z = -0.452 m(기대 책상 위 큐브 중심 -0.4525 m와 같은 수준). `depth_range_m` [0.3, 1.0]을 통과하고 `work_z_m`은 기본 꺼짐(켜면 예: [-0.5, -0.4]를 통과). 기본값 조정 불필요.
+- **아직 확인 안 된 것**: 실제 장착 위치·수직도(이 가정과 다르면 변환이 틀림), 렌즈 위치 실측, yaw는 여전히 카메라 기준(이미지 위쪽 = 앞쪽이면 로봇 yaw와 부호·오프셋 변환이 필요).
 
 ### 문제
 - 독립 위치 시험에서 약 9.4 cm 어긋난다(`camera_to_robot` 값은 근거 점 3개가 줄자 측정이라 신뢰 낮음, 정확도 미확정).
