@@ -228,20 +228,20 @@ pick, why = sel(at(1, (0.0, 0.1, 0.45)), at(2, (0.0, 0.1, 0.45)), prev=None)
 check("two candidates with identical score: ambiguous (default min_margin 0.05)", pick is None and "ambiguous" in why, why)
 
 
-# ---- fixed mount (config/camera.yaml), TEMPORARY, unverified: CAD offset shoulder roll axis -> holder corner (+174, -146, +16.3) mm
-# (CAD X = robot left, Y = back, Z = up), rotation from the IMU (pitch -45.1, phone landscape, upside down).
-# The lens-to-corner offset is not included.
-MOUNT = (0.174, -0.146, 0.016, 135.129, 0.988, 0.992)
-for name, p, want in (("cam (0,0,0.45) on the optical axis", (0, 0, 0.45), (0.174, -0.4635, -0.3026)),
-                      ("cam (0.1,0,0.45)", (0.1, 0, 0.45), (0.274, -0.4618, -0.3043)),
-                      ("cam (0,0.1,0.45)", (0, 0.1, 0.45), (0.1764, -0.5344, -0.2320))):
+# ---- fixed mount (config/camera.yaml), TEMPORARY, unverified: reference point P (-28, -117.7, 838.02) mm minus shoulder roll axis point
+# R0 (-202, 0, 850) mm = (+174, -117.7, -11.98) mm (CAD X = robot left, Y = back, Z = up); rotation from the IMU (pitch -45.1, phone
+# landscape, upside down). The lens position along the 45 deg slope (s = 0..40 mm above P) is not included.
+MOUNT = (0.174, -0.1177, -0.012, 135.129, 0.988, 0.992)
+for name, p, want in (("cam (0,0,0.45) on the optical axis", (0, 0, 0.45), (0.174, -0.4352, -0.3308)),
+                      ("cam (0.1,0,0.45)", (0.1, 0, 0.45), (0.274, -0.4335, -0.3326)),
+                      ("cam (0,0.1,0.45)", (0, 0.1, 0.45), (0.1764, -0.5061, -0.2603))):
     got = camera_to_robot(p, MOUNT)
     check(f"mount: {name} (given by the user, within 1e-3)", all(abs(a - b) < 1e-3 for a, b in zip(got, want)),
           tuple(round(v, 5) for v in got))
 pick, why = select_cube(doc(cube(center_cam1_m=[0.0045, -0.0399, 0.4981], depth_rect_m=0.4981)), DIM, DEPTH, c2r=MOUNT)
-check("mount: an earlier real cube reading cam (0.0045, -0.0399, 0.4981) passes depth_range_m; robot z about -0.365 "
+check("mount: an earlier real cube reading cam (0.0045, -0.0399, 0.4981) passes depth_range_m; robot z about -0.393 "
       "(NOT the table height -0.4525: the value is unverified)",
-      pick is not None and abs(pick["pos"][2] + 0.365) < 2e-3, (pick, why))
+      pick is not None and abs(pick["pos"][2] + 0.3932) < 2e-3, (pick, why))
 
 print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
