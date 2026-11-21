@@ -47,12 +47,17 @@ check "phases end GRASP RETURN DONE" "$(grep -o 'phase: [A-Z_]*' "$out/start.log
 r="$(ros2 run jax_bringup stop 2>&1)"
 check "stop after the run: 'not running (DONE)'" "$(echo "$r" | grep -q 'not running (DONE)' && echo 1 || echo 0)" "$r"
 
-echo "== a second up replaces the first"
-ros2 run jax_bringup up "[-0.048, -0.285, 20.0]" > "$out/up2.log" 2>&1 & up2=$!
+echo "== a second up replaces the first: finger test, no pressure sensors"
+kill $hand 2>/dev/null
+ros2 run jax_bringup up "[-0.048, -0.285, 20.0]" force:=true fingers:=true > "$out/up2.log" 2>&1 & up2=$!
 sleep 14
 n="$(nodes | uniq -c | awk '{print $1}' | sort -u | tr '\n' ' ')"
 check "every node once (no doubles)" "$([ "$n" = "1 " ] && echo 1 || echo 0)" "counts: $n"
 check "the first up has ended" "$(kill -0 $up1 2>/dev/null && echo 0 || echo 1)"
+timeout 120 ros2 run jax_bringup start > "$out/start2.log" 2>&1
+echo "   $(grep -o 'phase: [A-Z_]*' "$out/start2.log" | tr '\n' ' ')"
+check "finger test phases end INSERT FINGERS CLOSED OPEN DONE" "$(grep -o 'phase: [A-Z_]*' "$out/start2.log" | tail -5 | tr '\n' ' ' | grep -q 'INSERT phase: FINGERS phase: CLOSED phase: OPEN phase: DONE' && echo 1 || echo 0)"
+check "log: no pressure, fingers closed to 30, 30, 0, 60, 60, 60 deg" "$(grep -q 'NO pressure' "$out/up2.log" && grep -q 'fingers at 30.0, 30.0, 0.0, 60.0, 60.0, 60.0 deg' "$out/up2.log" && echo 1 || echo 0)"
 
 kill -INT -$up2 2>/dev/null; sleep 3; kill -KILL -$up2 -$up1 2>/dev/null; kill $hand $sim 2>/dev/null; sleep 1
 echo "   logs: $out"

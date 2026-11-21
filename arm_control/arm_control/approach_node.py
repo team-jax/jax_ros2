@@ -20,6 +20,8 @@ deploy README 7.4-7.8, policy grasp_lift_25550): fingers close on /pressure, the
 the sent targets), the arm returns to the L pose; phases GRASP -> RETURN -> DONE on /approach/phase. It needs
 fresh /pressure and /pressure_adc (stm_bridge); without them, or with grasp:=false, the arm holds the
 pregrasp pose (phase HOLD) as before. GRASP_TIMEOUT: no 4 cm lift within grasp_timeout_s (the arm holds).
+grasp_mode:=fingers is a finger servo check instead (grasp.FingerTest): the arm holds, the fingers close
+(pads from /pressure if there, else to their limits), hold 2 s and open again; phases FINGERS CLOSED OPEN DONE.
 
 finger_rotation is left out unless send_finger_rotation:=true: calibration.json allows it [0, 0] deg
 (the old IK pose) and the model turns it 0 -> -170 deg; set its zero, sign and range on the robot first.
@@ -41,7 +43,7 @@ from std_srvs.srv import Trigger
 from . import calibration
 from . import model_frames as mf
 from .approach_plan import PoseGate, check_plan, plan_from_pose
-from .grasp import OPEN_HAND, GraspController, MlpPolicy
+from .grasp import OPEN_HAND, FingerTest, GraspController, MlpPolicy
 from .model_tables import DEPLOY_JOINTS
 from .robot_v3 import RobotV3
 from .ros_io import Ak45Topics, ak45_topic_name
@@ -75,6 +77,7 @@ class ApproachNode(Node):
         self.max_error = p("max_error_deg", 15.0).value
         self.cal = calibration.load(p("calibration_file", "").value or None)
         self.grasp_on = p("grasp", True).value
+        self.grasp_mode = p("grasp_mode", "policy").value       # "policy" or "fingers" (FingerTest)
         self.grasp_timeout = p("grasp_timeout_s", 10.0).value
         self.cube_yaw = p("cube_yaw_deg", 0.0).value
         self.max_pressure_age = p("max_pressure_age_s", 0.5).value
@@ -207,6 +210,15 @@ class ApproachNode(Node):
 
     def start_grasp(self):
         pads, why = self.fresh_pressure()
+        if self.grasp_on and self.grasp_mode == "fingers":
+            self.grasp = FingerTest(np.r_[self.plan.final_deploy, OPEN_HAND])
+            self.set_phase("FINGERS")
+            self.get_logger().info("approach done: finger test (arm holds, fingers close, hold, open); "
+                                   + ("pads from /pressure" if pads else f"NO pressure ({why}): fingers close to their limits"))
+            return
+        if self.grasp_on and self.grasp_mode != "policy":
+            why = f"unknown grasp_mode {self.grasp_mode!r} (policy or fingers)"
+            pads = None
         if not self.grasp_on or pads is None:
             self.timer.cancel()
             self.timer = None
@@ -224,11 +236,12 @@ class ApproachNode(Node):
 
     def grasp_tick(self):
         pads, why = self.fresh_pressure()
-        if pads is None:
+        fingers_only = isinstance(self.grasp, FingerTest)
+        if pads is None and not fingers_only:
             self._halt(f"grasp: {why}")
             return
         try:
-            out = self.grasp.step(*pads)
+            out = self.grasp.step(pads[0] if pads else [0.0] * 6) if fingers_only else self.grasp.step(*pads)
         except (ValueError, np.linalg.LinAlgError) as e:
             self._halt(f"grasp: {e}")
             return

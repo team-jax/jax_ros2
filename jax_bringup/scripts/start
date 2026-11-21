@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Approach, grasp and lift the cube, then print the phases until the run ends.  THE ARM MOVES.
 #   ros2 run jax_bringup start          (stop at any time: ros2 run jax_bringup stop)
-# Phases: HOLD_FIRST RAISE SETTLE INSERT GRASP RETURN DONE; HOLD = no pressure topics (no grasp),
+# Phases: HOLD_FIRST RAISE SETTLE INSERT GRASP RETURN DONE (fingers:=true: ... INSERT FINGERS CLOSED OPEN DONE); HOLD = no pressure topics (no grasp),
 # GRASP_TIMEOUT = not lifted in time, STOPPED = stopped (watch, stop, pressure lost).
 res="$(ros2 service call /approach/start std_srvs/srv/Trigger 2>&1)"
 echo "$res" | grep -o "success=[A-Za-z]*, message='.*'" || echo "$res"

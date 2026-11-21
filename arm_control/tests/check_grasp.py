@@ -18,7 +18,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from arm_control import model_tables as mt  # noqa: E402
-from arm_control.grasp import LIMITS, GraspController, MlpPolicy, Q_L  # noqa: E402
+from arm_control.grasp import LIMITS, FingerTest, GraspController, MlpPolicy, Q_L  # noqa: E402
 from arm_control.robot_v3 import RobotV3, rot_to_quat  # noqa: E402
 
 MODEL = HERE.parent / "model"
@@ -132,6 +132,37 @@ check("no contact at all: GRASP_TIMEOUT after 10 s, never RETURN",
 for c in (np.array([-0.285, 0.16, 0.76]), np.array([-0.265, 0.40, 0.76])):
     gc, _, _, _ = chain(c)
     check(f"fake hand at world xy {c[:2].tolist()}: DONE", gc.phase == "DONE", (gc.phase, gc.reason))
+
+# --- finger test (grasp_mode fingers): arm still, fingers close / hold / open ---------------------------
+tables = mt.ApproachTables(MODEL, cube[:2] - mt.TABLE_ORIGIN)
+ap = mt.Approach(tables)
+while ap.phase != "HOLD":
+    ap.step()
+ft = FingerTest(ap.last)
+outs, phases = [], []
+for _ in range(1000):
+    outs.append(ft.step(np.zeros(6)))
+    phases.append(ft.phase)
+    if ft.phase == "DONE":
+        break
+outs = np.array(outs)
+seq = [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]]
+check("finger test, no sensors: FINGERS -> CLOSED -> OPEN -> DONE", seq == ["FINGERS", "CLOSED", "OPEN", "DONE"], seq)
+check("finger test: closed at the limits 30, 30, 0 and tips 60 deg", np.allclose(np.rad2deg(ft.closed), [30, 30, 0, 60, 60, 60]),
+      np.round(np.rad2deg(ft.closed), 1).tolist())
+check("finger test: ends open (0, 0, -30, 0, 0, 0)", np.allclose(np.rad2deg(outs[-1, 8:]), [0, 0, -30, 0, 0, 0]))
+check("finger test: the arm (8 joints) never moves", np.abs(outs[:, :8] - ap.last[:8]).max() < 1e-12)
+check("finger test: first output keeps the hand as INSERT left it (no jump > 1 deg)",
+      np.rad2deg(np.abs(outs[0, 8:] - ap.last[8:])).max() < 1.0, np.round(np.rad2deg(outs[0, 8:] - ap.last[8:]), 2).tolist())
+check("finger test: 6-9 s in all (about 3.5 s closing, 2 s hold, 1.5 s open)", 6 <= len(phases) / 60 <= 9, f"{len(phases) / 60:.2f} s")
+ft2 = FingerTest(ap.last)
+for _ in range(400):
+    ft2.step([0, 0, 0] + [max(0.0, (q - t) * 40) for q, t in zip(ft2.target[8:11], np.deg2rad([6, 6, -26]))])
+    if ft2.phase != "FINGERS":
+        break
+check("finger test with pads: stops closing near the touch angle (fingers < 10 deg, thumb < -20 deg)",
+      ft2.phase == "CLOSED" and np.rad2deg(ft2.closed[0]) < 10 and np.rad2deg(ft2.closed[2]) < -20,
+      np.round(np.rad2deg(ft2.closed[:3]), 1).tolist())
 
 print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

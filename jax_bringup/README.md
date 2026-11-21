@@ -14,6 +14,9 @@ ros2 run jax_bringup stop                        #    언제든 멈춤
 ```
 
 - `up` 뒤에 `force:=true`(보정 미검증이어도 시작), `grasp:=false`(접근만), `result_json:=...`(카메라 파일)를 붙일 수 있다.
+- **손가락 시험** (압력센서 없이, 고정 위치): `ros2 run jax_bringup up "[0.10, -0.30, 20.0]" force:=true fingers:=true` → `zero` → `start`.
+  접근이 끝나면 팔은 그대로 두고 손가락만 닫고(약 3.5 s, 첫 관절 30°·엄지 0°·끝마디 60°까지, 압력이 있으면 닿는 곳에서 멈춤) 2 s 쥔 뒤 다시 편다.
+  단계: `INSERT FINGERS CLOSED OPEN DONE`. 손가락 서보는 `calibration.json`에서 영점 90°, 부호 +1이 **미검증**이니, 처음에는 손을 가까이 두고 방향을 본다.
 - 다시 켜려면 `up`을 한 번 더 실행한다. 앞의 것은 알아서 꺼진다(이때 토크가 풀리니 팔을 받친다).
 - 카메라 프로그램(SteroDepthSeg)은 따로 켠다:
   `cd ~/Desktop/StereoDepthSeg && ./venv_ffs/bin/python z_phone_stereo.py --physical 2 5 --calib-stereo calib_phone_pair.json --yolo seg --rgbd-viewer --out phone_stereo/runs/my_view`

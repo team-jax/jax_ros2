@@ -217,3 +217,52 @@ class GraspController:
 def rotation_error_world(r_want, r_now):
     from .robot_v3 import rotation_error
     return rotation_error(r_want, r_now)
+
+
+class FingerTest:
+    """Fingers only, the arm holds still: a check of the finger servos at the pregrasp pose (no policy, no IK).
+
+    FINGERS: the first joints close by README 7.5 (0.15 rad/s until a digit reads >= 0.3 N, then held at
+    0.3 N by the 0.0012 rad/N rule); the tips bend to tip_deg. With no pressure sensors (pads 0) every
+    finger closes to its limit (30 deg, thumb 0) in about 3.5 s. CLOSED: held hold_s. OPEN: back to the
+    open hand (0, 0, -30, 0, 0, 0) over open_s, then DONE.
+    """
+
+    def __init__(self, start, tip_deg=60.0, hold_s=2.0, open_s=1.5, max_close_s=6.0):
+        self.start = np.asarray(start, float).copy()
+        self.target = self.start.copy()
+        self.target[8:] = OPEN_HAND
+        self.first = OPEN_HAND[:3].copy()
+        self.tips = np.deg2rad(tip_deg)
+        self.hold, self.open, self.max_close = int(hold_s / DT), int(open_s / DT), int(max_close_s / DT)
+        self.phase, self.phase_k, self.still = "FINGERS", 0, 0
+        self.closed = None
+        self.reason = ""
+
+    def step(self, pad_n):
+        if self.phase == "DONE":
+            return self.target.copy()
+        self.phase_k += 1
+        if self.phase == "FINGERS":
+            f = np.asarray(pad_n[:3], float) + np.asarray(pad_n[3:], float)
+            on = f >= CONTACT_N
+            step = np.where(on, np.clip(CLOSE_GAIN * (CONTACT_N - f), -CLOSE_SPEED * DT, CLOSE_SPEED * DT),
+                            CLOSE_SPEED * DT)
+            new = np.clip(self.first + step, FIRST_LO, FIRST_HI)
+            self.still = self.still + 1 if np.allclose(new, self.first, atol=1e-6) else 0
+            self.first = new
+            ramp = min(1.0, self.phase_k * DT / 1.0)
+            self.target[8:] = np.r_[self.first, self.tips * ramp, self.tips * ramp, self.tips * ramp]
+            if (self.still >= 30 and ramp >= 1.0) or self.phase_k >= self.max_close:
+                self.closed = self.target[8:].copy()
+                self.reason = ("fingers at " + ", ".join(f"{d:.1f}" for d in np.rad2deg(self.closed)) + " deg; pads "
+                               + ", ".join(f"{v:.2f}" for v in f) + " N")
+                self.phase, self.phase_k = "CLOSED", 0
+        elif self.phase == "CLOSED":
+            if self.phase_k >= self.hold:
+                self.phase, self.phase_k = "OPEN", 0
+        elif self.phase == "OPEN":
+            self.target[8:] = self.closed + smooth(self.phase_k / self.open) * (OPEN_HAND - self.closed)
+            if self.phase_k >= self.open:
+                self.phase, self.reason = "DONE", "fingers opened again"
+        return self.target.copy()

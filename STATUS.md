@@ -214,6 +214,12 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 - (같은 날 추가) `/pressure`(N, 6개): 사용자가 준 변환식을 `stm_bridge/pressure.py`에 넣었다. ADC = 바이트×4/1023, 센서 RA12P(데이터시트 곡선 gf↔kΩ 16점), 회로 공급전압–RA12P–출력–Rc 10 kΩ–접지 → R = Rc·(1−adc)/adc, 곡선 사이는 log-log 직선 보간. 5 gf 미만(R ≥ 60 kΩ) 0 N, 4000 gf 초과(R ≤ 2.5 kΩ) 끝값 39.2266 N. **센서별 보정 없음.** 받은 코드의 주석 `README section 3`은 이 레포에 없는 문서라 'RA12P 데이터시트 곡선(사용자 제공)'으로 바꿨다. 시험 `tests/check_pressure.py`(곡선 점 R 7.5 kΩ → 260 gf = 2.549729 N 등, log 중점, 단조 증가), `check_node.py`(바이트 128 → 130.37 gf = 1.2785 N 손계산).
 - 시험: `stm_bridge/tests/check_protocol.py`(손계산 255 → 1020/1023 = 0.997067 등, 잘못된 프레임 4종), `check_node.py`(python-can 가상 버스로 프레임 4개 → `/pressure_adc` 1개). 기존 서보 시험 그대로 통과. 실제 STM 보드로는 시험하지 않음.
 
+## 2026-11-21 손가락 시험 모드 (`fingers:=true`, 고정 위치)
+- 사용자: 손가락 서보를 다 연결함, 아직 고정 위치로 시험. 압력센서 없이 학습 정책 쥐기를 돌리면(패드 0) 시뮬에서 손이 약 10 cm 들리고 손목이 57°까지 돌아(IK 오프셋 한계) 공중에서 비틀린다 → 대신 손가락만 움직이는 시험을 만들었다.
+- `grasp.FingerTest`, approach_node `grasp_mode:=fingers`, `ros2 run jax_bringup up "[x, y, yaw]" force:=true fingers:=true`: INSERT 뒤 팔은 그대로, 손가락 첫 관절은 README 7.5 닫기 규칙(0.15 rad/s, 0.3 N에서 멈춤, 압력 없으면 한계까지: 30°, 30°, 엄지 0°), 끝마디는 1 s 동안 60°까지 → 2 s 유지 → 1.5 s 동안 펼침(0, 0, −30, 0, 0, 0)으로 → DONE. 단계 `FINGERS CLOSED OPEN DONE`.
+- 모터각(현재 `calibration.json`, 영점 90°, 부호 +1, **미검증**): 손가락 첫 관절 90 → 120°, 엄지 60 → 90°, 끝마디 90 → 150°.
+- 시험: `check_grasp.py`에 손가락 시험 7개(단계, 한계, 다시 펼침, 팔 고정, 시작 점프 없음, 7.5 s, 패드가 있으면 닿는 곳에서 멈춤), `bringup_vcan.sh`에 vcan 시나리오(압력 없음 → `INSERT FINGERS CLOSED OPEN DONE`, 로그의 손가락 각도) 추가, 모두 통과. `grasp_vcan` 회귀 통과. 실물 손가락으로는 아직 안 함.
+
 ## 2026-11-21 전체 시험 (push된 648fdcf 기준)
 - 빌드 5개 패키지 경고 0, pyflakes 0건, 셸 문법 이상 없음.
 - Python 시험 13개 통과. vcan 통합 시험 7개(launch, approach, grasp, check_topics, chain, calibrate, jax_bringup) 중 2개가 처음에 실패:
