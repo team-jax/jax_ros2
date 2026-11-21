@@ -31,7 +31,11 @@ ros2 launch arm_control arm.launch.py max_speed_deg_s:=300.0 > "$out/launch.log"
 launchpid=$!
 sleep 8
 
-nodes="$(ros2 node list --no-daemon 2>/dev/null)"
+for _ in $(seq 10); do     # discovery can lag a few seconds on a busy machine
+    nodes="$(ros2 node list --no-daemon 2>/dev/null)"
+    [ "$(echo "$nodes" | grep -cxE '/ak45_node|/stm_bridge|/arm_control_node')" = 3 ] && break
+    sleep 1
+done
 echo "nodes: $(echo $nodes)"
 for n in /ak45_node /stm_bridge /arm_control_node; do
     check "node $n is up" "$(echo "$nodes" | grep -qx "$n" && echo 1 || echo 0)"

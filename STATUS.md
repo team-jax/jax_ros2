@@ -214,6 +214,13 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 - (같은 날 추가) `/pressure`(N, 6개): 사용자가 준 변환식을 `stm_bridge/pressure.py`에 넣었다. ADC = 바이트×4/1023, 센서 RA12P(데이터시트 곡선 gf↔kΩ 16점), 회로 공급전압–RA12P–출력–Rc 10 kΩ–접지 → R = Rc·(1−adc)/adc, 곡선 사이는 log-log 직선 보간. 5 gf 미만(R ≥ 60 kΩ) 0 N, 4000 gf 초과(R ≤ 2.5 kΩ) 끝값 39.2266 N. **센서별 보정 없음.** 받은 코드의 주석 `README section 3`은 이 레포에 없는 문서라 'RA12P 데이터시트 곡선(사용자 제공)'으로 바꿨다. 시험 `tests/check_pressure.py`(곡선 점 R 7.5 kΩ → 260 gf = 2.549729 N 등, log 중점, 단조 증가), `check_node.py`(바이트 128 → 130.37 gf = 1.2785 N 손계산).
 - 시험: `stm_bridge/tests/check_protocol.py`(손계산 255 → 1020/1023 = 0.997067 등, 잘못된 프레임 4종), `check_node.py`(python-can 가상 버스로 프레임 4개 → `/pressure_adc` 1개). 기존 서보 시험 그대로 통과. 실제 STM 보드로는 시험하지 않음.
 
+## 2026-11-21 전체 시험 (push된 648fdcf 기준)
+- 빌드 5개 패키지 경고 0, pyflakes 0건, 셸 문법 이상 없음.
+- Python 시험 13개 통과. vcan 통합 시험 7개(launch, approach, grasp, check_topics, chain, calibrate, jax_bringup) 중 2개가 처음에 실패:
+  - launch_vcan: 8 s 뒤 `ros2 node list`에 arm_control_node가 아직 안 보임(프로세스는 정상 실행·정상 종료). 다시 돌리면 통과.
+  - check_topics: `/object_pose`의 발행·구독 노드가 `_NODE_NAME_UNKNOWN_`(엔드포인트가 노드 이름보다 먼저 발견됨). 두 번 연속 실패.
+  - 둘 다 발견(discovery) 지연이다(같은 시각 실물 로봇 노드가 돌고 있어 PC가 바빴다). 시험이 최대 10 s 동안 다시 보게 고쳤고, 고친 뒤 check_topics 2번·launch_vcan 1번 통과. 노드 코드는 그대로.
+
 ## 2026-11-20 `jax_bringup` 패키지 (쉬운 bring-up)
 - 명령 4개: `ros2 run jax_bringup up` (이전 노드 정리 → 락 대기 → can0 재시작 → `jax.launch.py`, 자기를 띄운 `ros2 run`은 끄지 않음), `zero`(시뮬 0 자세), `start`(접근·쥐기, 단계 출력), `stop`. 고정 위치는 `up "[x, y, yaw]"`.
 - 설정 한 곳: `jax_bringup/config/jax.yaml`(카메라 결과 파일, 속도 상한, 쥐기 시간, 큐브 각도, 책상 보정). `camera_to_robot`은 `vision_node/config/camera.yaml`, AK45 상한은 `ak45_node.yaml`, 보정은 `calibration.json`에 그대로.

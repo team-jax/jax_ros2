@@ -56,7 +56,11 @@ EOF
 }
 echo "== NODES.md section 4: type, publisher, subscriber"
 while IFS='|' read -r topic want_type want_pub want_sub; do
-    row="$(topic_row "$topic")"
+    for _ in $(seq 10); do     # endpoints can show up before their node names (_NODE_NAME_UNKNOWN_)
+        row="$(topic_row "$topic")"
+        [[ "$row" == *_NODE_NAME_UNKNOWN_* ]] || break
+        sleep 1
+    done
     got_type="${row%%|*}"; rest="${row#*|}"; got_pub="${rest%%|*}"; got_sub="${rest#*|}"
     check "$topic: type $want_type" "$([ "$got_type" = "$want_type" ] && echo 1 || echo 0)" "got $got_type"
     check "$topic: published by '${want_pub:-nobody}'" "$([ "$got_pub" = "$want_pub" ] && echo 1 || echo 0)" "got '$got_pub'"
