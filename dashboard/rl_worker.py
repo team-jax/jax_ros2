@@ -142,7 +142,7 @@ def _grav(C, mujoco, c, q7):
     return out[c.vadr[c.arm[:7]]] / C.ARM_KP
 
 
-def _ik_translate(C, mujoco, c, q14, hand_q, tip0, delta, iters=400, wr=2.0, q_init=None):
+def _ik_translate(C, mujoco, c, q14, hand_q, tip0, delta, iters=400, wr=2.0, q_init=None, null_ref=None):
     """손 방향 hand_q 를 고정하고 쥐는 점(tip_mid)만 delta 만큼 옮기는 팔 7관절 해 (감쇠 최소제곱, 한계 안). (q7, 위치오차 m, 방향오차 °)"""
     m, s = c.m, c.scratch
     s.qpos[:] = c.d.qpos
@@ -182,7 +182,8 @@ def _ik_translate(C, mujoco, c, q14, hand_q, tip0, delta, iters=400, wr=2.0, q_i
         Jinv = J.T @ np.linalg.inv(J @ J.T + 0.01 ** 2 * np.eye(6))
         dq = Jinv @ e
         if IK_NULL_GAIN:          # 팔 7 관절 · 손 6 값 → 남는 한 방향은 원래 궤적 자세 쪽으로 (2026-11-25: 떠돌아 손목·손 돌림이 프레임마다 튀었다)
-            dq += IK_NULL_GAIN * (np.eye(7) - Jinv @ J) @ np.clip(q0 - s.qpos[qa], -0.1, 0.1)
+            ref = q0 if null_ref is None else null_ref     # 2026-11-26: 이어 풀 때는 직전 프레임 해 쪽으로 (원래 자세 쪽으로 끌면 관절 끝에서 두 해 사이를 오갔다 — 팔꿈치 ±20°)
+            dq += IK_NULL_GAIN * (np.eye(7) - Jinv @ J) @ np.clip(ref - s.qpos[qa], -0.1, 0.1)
         s.qpos[qa] = np.clip(s.qpos[qa] + dq, lo, hi)
     mujoco.mj_kinematics(m, s)
     return s.qpos[qa].copy(), float(np.linalg.norm(ep)), float(math.degrees(np.linalg.norm(er)))
@@ -429,7 +430,7 @@ def run_lift_drop(C, mujoco, spot, mass, home=True):
     return summary, tr
 
 
-GRIP_FORCE_X = 5.0     # (3 → 5: 2026-11-25 '손가락 행동 스케일 크게, 더 꽉') — 정책 손가락 행동의 힘 목표 배율 (2026-11-25 사용자: 잡을 때 더 오므리게 — 행동 스케일). 정책이 고른 쥐는 힘
+GRIP_FORCE_X = 6.0     # (2026-11-26 '행동 스케일링 조금 높여' 5 → 6) (3 → 5: 2026-11-25 '손가락 행동 스케일 크게, 더 꽉') — 정책 손가락 행동의 힘 목표 배율 (2026-11-25 사용자: 잡을 때 더 오므리게 — 행동 스케일). 정책이 고른 쥐는 힘
                        # (손가락 1·2 = 0.5·(5 + 4·a7), 엄지 = 5 + 4·a9) 에 곱한다. 12 자리 시뮬: 1× = 11/12 성공 · 첫 마디 6.9/4.3°,
                        # 3× = 11/12 · 8.5/8.9° (5× 부터 한 자리가 큐브를 놓침). IK 레포 파일은 안 고치고 grasp_lift 사본만 바꿔 끼운다
 GRIP_FORCE_RANGE = (1.0, 6.0)
@@ -465,6 +466,9 @@ INSERT_PUSH_FWD = (0.0, -1.0, 0.0)   # 로봇 틀 '앞' (−y)
 TILT_TIP_TOL_M = 0.003               # 손 숙이기: 손끝을 이 안으로 못 지키면 덜 숙인다
 TILT_STEP_DEG = 1.0                  # 숙이는 각을 재생 프레임(30 Hz)마다 이만큼까지만 바꾼다 (= 초당 30°, 이웃 프레임이 튀지 않게)
 TILT_LEAD_S = 2.0                    # 숙이기를 SETTLE 전 이 시간 동안 (다가가며) 미리 — INSERT(실물에서 천천히)에는 밀어 넣기만
+MOVE_STEP = 0.04                     # 밀기·옆·내리기 배율을 재생 프레임마다 이만큼까지만 바꾼다 (0 → 1 에 약 0.8 초)
+SAFE_ERR_M = 0.010                   # 고친 궤적 손끝 오차가 이보다 크거나
+SAFE_JUMP_DEG = 15.0                 # 팔 관절이 한 프레임에 이보다 많이 바뀌면 고치기를 버린다
 INSERT_PUSH_LEFT = (1.0, 0.0, 0.0)   # 로봇 틀 '왼쪽' (+x) — side_m 이 − 면 오른쪽
 
 
@@ -523,6 +527,17 @@ def _low_pt(c, s, geoms):
     return best
 
 
+NULL_FOLLOW_A = 0.15   # 이어 풀 때 남는 방향의 목표 = 직전 해 + 이 비율만큼 원래 자세 쪽 (고치기가 줄어드는 끝에서는 원래 자세로)
+
+
+def _null_ref(c, q_init, q14, amount):
+    """2026-11-26: 남는 방향(팔 7 관절 · 손 6 값)의 끌 목표. 원래 자세만 보면 관절 끝에서 두 해를 오갔고 (팔꿈치 ±20°),
+    직전 해만 보면 원래 자세에서 멀어져 고치기가 끝나는 프레임에서 튀었다 → 직전 해에서 원래 자세 쪽으로 조금씩, 고치기가 0 에 가까울수록 원래 자세."""
+    q0 = np.asarray(q14, float)[c.arm[:7]]
+    a = NULL_FOLLOW_A + (1.0 - NULL_FOLLOW_A) * (1.0 - min(1.0, max(0.0, amount)))
+    return np.clip(q_init + a * (q0 - q_init), c.lo[c.arm[:7]], c.hi[c.arm[:7]])
+
+
 def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, tilt_deg=0.0, down_m=0.0):
     """2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': 재생 궤적의 frames 에서 쥐는 점을 로봇 앞(−y)으로 push_m 더 (손 방향 그대로, 실물 범위 안).
     down_m: 2026-11-26 사용자 '잡을 때 결과가 위로 가 있다, 팔을 낮춰': 같은 구간에 쥐는 점을 로봇 아래(−z)로 (밀어 넣기와 같은 무게).
@@ -563,56 +578,98 @@ def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, 
         piv = _low_pt(c, s, geoms) if ax is not None else None   # 회전 중심 = 가장 낮은 손가락 점 → 숙여도 손가락이 책상 쪽으로 안 내려감
         rows.append((k, w, wt, q14, tip0, hq, hpos, ax, piv))
 
-    def solve(row, deg, q_init):
+    def solve(row, deg, q_init, sc=1.0):
         k, w, wt, q14, tip0, hq, hpos, ax, piv = row
         if deg and ax is not None:
             hq_t = _tilt_quat(C, hq, tip0, hpos, deg)
             tip_t = piv + _rotm(ax, -math.radians(deg)) @ (tip0 - piv)   # 손끝도 같은 회전 (가장 낮은 점 둘레)
         else:
             hq_t, tip_t = hq, tip0
-        q7, ep, er = _ik_translate(C, mujoco, c, q14, hq_t, tip0, (tip_t - tip0) + w * push_m * fw, iters=400 if tilt_deg else 300, q_init=q_init)
+        q7, ep, er = _ik_translate(C, mujoco, c, q14, hq_t, tip0, (tip_t - tip0) + sc * w * push_m * fw, iters=400 if tilt_deg else 300, q_init=q_init,
+                                   null_ref=None if q_init is None else _null_ref(c, q_init, q14, max(w, wt)))
         return q7, ep, er, float(tip_t[2] - tip0[2])
 
+    def ramp(vals, step, cap0=None):
+        """앞뒤로 훑어 '프레임마다 step 넘게 안 바뀌고, 어디서도 가능한 최대를 안 넘는' 값 — 못 가는 자리 앞에서 미리 천천히 줄인다"""
+        prof = list(vals)
+        for i in range(1, len(prof)):
+            prof[i] = min(prof[i], prof[i - 1] + step)
+        for i in range(len(prof) - 2, -1, -1):
+            prof[i] = min(prof[i], prof[i + 1] + step)
+        if prof and cap0 is not None:
+            prof[0] = min(prof[0], cap0)
+        return prof
+
+    # 0) 2026-11-26 '갑자기 책상에 부딪히고 못 잡음': 밀기·옆·내리기를 실물 범위 안에서 다 못 가는 자리 (예: 밀기 5 + 내림 6.5 cm) 에서
+    #    억지로 풀어 손끝이 98 mm 벗어나고 팔꿈치가 프레임마다 53° 씩 떨었다 → 프레임마다 갈 수 있는 만큼만 (배율 sc), 천천히 바뀌게
+    #    (손을 숙여야 낮게 닿는다 → 숙이기와 같이 찾는다: 배율이 큰 것부터, 그 안에서 많이 숙인 것부터)
+    sfeas = []
+    for r in rows:
+        best = 0.0
+        dmax = r[2] * tilt_deg if (tilt_deg and r[7] is not None) else 0.0
+        if r[1] <= 1e-4:
+            best = 1.0
+        else:
+            for sc in (1.0, 0.8, 0.6, 0.4, 0.2):
+                if any(solve(r, dmax * fr, None, sc)[1] <= TILT_TIP_TOL_M for fr in ((1.0, 0.75, 0.5, 0.25, 0.0) if dmax else (0.0,))):
+                    best = sc
+                    break
+        sfeas.append(best)
+    sprof = ramp(sfeas, MOVE_STEP)
     # 1) 프레임마다 숙일 수 있는 최대 각 (손끝을 TILT_TIP_TOL_M 안으로 — 팔꿈치가 실물 범위 끝에 걸리는 자리는 덜)
     want = [(r[2] * tilt_deg if (tilt_deg and r[7] is not None) else 0.0) for r in rows]
     feas = []
-    for r, dmax in zip(rows, want):
+    for r, dmax, sc in zip(rows, want, sprof):
         best = 0.0
         for frac in ((1.0, 0.75, 0.5, 0.25) if dmax else ()):
-            if solve(r, dmax * frac, None)[1] <= TILT_TIP_TOL_M:
+            if solve(r, dmax * frac, None, sc)[1] <= TILT_TIP_TOL_M:
                 best = dmax * frac
                 break
         feas.append(best)
-    # 2) 앞뒤로 훑어 '프레임마다 TILT_STEP_DEG 넘게 안 바뀌고, 어디서도 가능한 최대를 안 넘는' 각 — 못 숙이는 자리 앞에서 미리 천천히 줄인다
-    prof = list(feas)
-    for i in range(1, len(prof)):
-        prof[i] = min(prof[i], prof[i - 1] + TILT_STEP_DEG)
-    for i in range(len(prof) - 2, -1, -1):
-        prof[i] = min(prof[i], prof[i + 1] + TILT_STEP_DEG)
-    if prof:
-        prof[0] = min(prof[0], TILT_STEP_DEG)
-    # 3) 그 각으로 차례로, 직전 프레임 해에서 이어서 푼다 (해가 다른 쪽으로 튀지 않게)
-    prev_q7, prev_arm, grasp_worst = None, None, 0.0
-    for r, deg in zip(rows, prof):
+    # 2) 숙이는 각도 같은 식으로
+    prof = ramp(feas, TILT_STEP_DEG, TILT_STEP_DEG)
+    # 3) 그 각·배율로 차례로, 직전 프레임 해에서 이어서 푼다 (해가 다른 쪽으로 튀지 않게).
+    #    2026-11-26: 숙인 자세(팔꿈치 +27°)에서 깊게 밀고 내리는 자세(팔꿈치 −48°)는 다른 해 — 이어 풀면 못 닿고 새로 풀면 튄다 →
+    #    첫 번째로 '이어 풀어서 닿는 만큼'(배율·각)을 재고, 그것을 다시 천천히 바뀌게 한 뒤 두 번째로 푼다
+    def sweep(sprof, prof, shrink):
+        res, prev_q7, prev_arm = [], None, None
+        for r, deg, sc in zip(rows, prof, sprof):
+            q14 = r[3]
+            arm0 = q14[c.arm[:7]]
+            q_init = None if prev_q7 is None else prev_q7 + (arm0 - prev_arm)
+            q7, ep, er, lift = solve(r, deg, q_init, sc)
+            if ep > TILT_TIP_TOL_M:                   # 이어 풀었는데 손끝이 벗어남 → 덜 숙이고, 덜 밀고 (shrink 면 0 까지), 그래도 안 되면 새로 푼 해 (관절이 덜 튀면)
+                for d2 in [max(0.0, deg - i * TILT_STEP_DEG) for i in (1, 2, 3, 4, 5)]:
+                    g = solve(r, d2, q_init, sc)
+                    if g[1] < ep:
+                        q7, ep, er, lift, deg = *g, d2
+                    if ep <= TILT_TIP_TOL_M:
+                        break
+                steps = [max(0.0, sc - i * 0.1) for i in range(1, 11)] if shrink else [max(0.0, sc - i * MOVE_STEP) for i in (1, 2, 3)]
+                for s2 in (steps if ep > TILT_TIP_TOL_M else []):
+                    g = solve(r, deg, q_init, s2)
+                    if g[1] < ep:
+                        q7, ep, er, lift, sc = *g, s2
+                    if ep <= TILT_TIP_TOL_M:
+                        break
+                if ep > TILT_TIP_TOL_M:
+                    g = solve(r, deg, None, sc)
+                    if g[1] < ep and (prev_q7 is None or np.max(np.abs(np.degrees(g[0] - (prev_q7 + (arm0 - prev_arm))))) <= 10.0):
+                        q7, ep, er, lift = g
+            prev_q7, prev_arm = q7, arm0
+            res.append((r, q7, ep, er, lift, deg, sc))
+        return res
+
+    first = sweep(sprof, prof, True)
+    sprof = ramp([min(a, x[6]) for a, x in zip(sprof, first)], MOVE_STEP)
+    prof = ramp([min(a, x[5]) for a, x in zip(prof, first)], TILT_STEP_DEG, TILT_STEP_DEG)
+    grasp_worst, scs, seq = 0.0, [], []
+    for r, q7, ep, er, lift, deg, sc in sweep(sprof, prof, False):
         k, w, q14 = r[0], r[1], r[3]
-        arm0 = q14[c.arm[:7]]
-        q_init = None if prev_q7 is None else prev_q7 + (arm0 - prev_arm)
-        q7, ep, er, lift = solve(r, deg, q_init)
-        if ep > TILT_TIP_TOL_M:                   # 이어 풀었는데 손끝이 벗어남 → 1° 씩 덜 숙여 보고, 그래도 안 되면 새로 푼 해 (관절이 덜 튀면)
-            for d2 in [max(0.0, deg - i * TILT_STEP_DEG) for i in (1, 2, 3, 4, 5)]:
-                g = solve(r, d2, q_init)
-                if g[1] < ep:
-                    q7, ep, er, lift, deg = *g, d2
-                if ep <= TILT_TIP_TOL_M:
-                    break
-            if ep > TILT_TIP_TOL_M:
-                g = solve(r, deg, None)
-                if g[1] < ep and (prev_q7 is None or np.max(np.abs(np.degrees(g[0] - (prev_q7 + (arm0 - prev_arm))))) <= 10.0):
-                    q7, ep, er, lift = g
-        prev_q7, prev_arm = q7, arm0
         q = q14.copy()
         q[c.arm[:7]] = q7
         out[k] = q
+        seq.append((k, q7))
         if deg:
             lifts.append(lift)
         worst, worst_er = max(worst, ep), max(worst_er, er)
@@ -620,9 +677,21 @@ def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, 
             grasp_worst = max(grasp_worst, ep)      # 잡는 순간 (INSERT ~ 들기 1 초) 손끝 오차
         if w >= 0.999:
             held.append(deg)      # 잡고 있는 동안 실제로 숙인 각
-    return out, {"applied": bool(out), "push_cm": round(float(-fw_robot[1]) * 100, 1), "side_cm": round(float(fw_robot[0]) * 100, 1), "down_cm": round(float(down_m) * 100, 1),
-                 "tilt_deg": round(float(tilt_deg), 1), "tilt_used_deg": [round(min(held), 1), round(max(held), 1)] if held else None,
-                 "tilt_lift_mm": round(max(lifts) * 1000, 1) if lifts else 0.0, "frames": len(out), "worst_err_mm": round(worst * 1000, 1), "grasp_err_mm": round(grasp_worst * 1000, 1), "worst_ori_err_deg": round(worst_er, 1)}
+            scs.append(sc)
+    # 4) 마지막 검사: 고친 궤적이 프레임마다 SAFE_JUMP_DEG 넘게 튀거나 손끝이 SAFE_ERR_M 넘게 벗어나면 고치지 않는다 (정책 궤적 그대로 — 떨며 책상을 치는 것보다 낫다)
+    jump = 0.0
+    if seq:
+        allq = {k: np.asarray(tr["q"][k], float)[c.arm[:7]] for k in frames}
+        allq.update({k: q7 for k, q7 in seq})
+        ks = sorted(k for k in frames if k in allq)
+        jump = max((float(np.max(np.abs(np.degrees(allq[b] - allq[a])))) for a, b in zip(ks, ks[1:])), default=0.0)
+    info = {"applied": bool(out), "push_cm": round(float(-fw_robot[1]) * 100, 1), "side_cm": round(float(fw_robot[0]) * 100, 1), "down_cm": round(float(down_m) * 100, 1),
+            "tilt_deg": round(float(tilt_deg), 1), "tilt_used_deg": [round(min(held), 1), round(max(held), 1)] if held else None,
+            "move_used": [round(min(scs), 2), round(max(scs), 2)] if scs else None, "max_jump_deg": round(jump, 1),
+            "tilt_lift_mm": round(max(lifts) * 1000, 1) if lifts else 0.0, "frames": len(out), "worst_err_mm": round(worst * 1000, 1), "grasp_err_mm": round(grasp_worst * 1000, 1), "worst_ori_err_deg": round(worst_er, 1)}
+    if out and (worst > SAFE_ERR_M or jump > SAFE_JUMP_DEG):
+        return {}, dict(info, applied=False, why=f"고친 궤적이 안전하지 않아 정책 궤적 그대로 (손끝 오차 {worst * 1000:.0f} mm · 프레임 튐 {jump:.0f}°)")
+    return out, info
 
 
 def cmd_run(C, mujoco, ik, a):
@@ -679,7 +748,7 @@ def cmd_run(C, mujoco, ik, a):
         down_m = 0.0
     down_m = max(0.0, min(0.08, down_m))
     if (push_m > 0 or side_m or tilt or down_m) and not tgt:
-        push_q, push_info = _insert_push(C, mujoco, spot, mass, tr, summary.get("phase_t_s") or {}, Rm, min(push_m, 0.05), idx,
+        push_q, push_info = _insert_push(C, mujoco, spot, mass, tr, summary.get("phase_t_s") or {}, Rm, max(0.0, min(push_m, 0.08)), idx,
                                          side_m=max(-0.05, min(0.05, side_m)), tilt_deg=tilt, down_m=down_m)
     names = [d for d in DASH if d] + ["rl_rotation"]
     cols = [i for i, d in enumerate(DASH) if d] + [9]

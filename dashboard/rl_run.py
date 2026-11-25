@@ -19,7 +19,7 @@ WORKER = HERE / "rl_worker.py"
 MARK = "@@RL@@"
 TIMEOUT_S = 120
 LIMITS = {"x_cm": (-60.0, 60.0), "y_cm": (-80.0, 80.0), "yaw_deg": (-180.0, 180.0), "mass_g": (20.0, 100.0),
-          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0), "insert_push_cm": (0.0, 5.0), "insert_side_cm": (-5.0, 5.0), "insert_tilt_deg": (-40.0, 40.0), "insert_down_cm": (0.0, 8.0),
+          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0), "insert_push_cm": (0.0, 8.0), "insert_side_cm": (-5.0, 5.0), "insert_tilt_deg": (-40.0, 40.0), "insert_down_cm": (0.0, 8.0),
           "grip_force_x": (1.0, 6.0)}     # 2026-11-25: 이 줄이 없어 grip_force_x 를 넘기면 KeyError (rl_worker.GRIP_FORCE_RANGE 와 같게)
 _lock = threading.Lock()     # 한 번에 하나만 (CPU 를 먹는다, 폰·PC 가 같이 눌러도 섞이지 않게)
 _info_cache = {}
@@ -28,8 +28,8 @@ TABLE_TOP_Z = -0.4775            # 로봇 틀에서 책상 윗면 (어깨 아래
 RUNS_KEEP = 5
 INSERT_SIDE_CM = -2.0            # 2026-11-25 사용자 '밀어 넣기 할 때 너무 왼쪽': 같은 구간에 로봇 옆으로 (cm, + 왼쪽 / − 오른쪽, −5~5). (2026-11-26 '2 cm 왼쪽' 은 여기 말고 server.RL_SIDE_FIX_M 로 — 여기를 0 으로 하면 어깨가 범위 끝에 걸려 손목 숙이기가 30° → 5° 로 줄었다)
 INSERT_TILT_DEG = 35.0           # 2026-11-25 사용자 '손목을 아래로 20° 정도 꺾고 잡으면' → '좀 더 구부려' 30° → 2026-11-26 '좀 더 손목 아래로' 35° (40° 는 시뮬에서 34° 에 막히는 자리가 있다): 같은 구간에 손을 손끝 쪽이 아래로 (쥐는 점은 그대로, −30~30)
-INSERT_DOWN_CM = 4.5             # 2026-11-26 사용자 '잡을 때 위로 가 있다 — 팔을 낮춰' 2 → '밀어 넣기 할 때 좀 더 내리면서' 3.5 → '좀 더 밑으로' 4.5: INSERT~들기 동안 쥐는 점을 로봇 아래로 이만큼 더 (cm, 0~4)
-INSERT_PUSH_CM = 2.0             # 2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': INSERT~들기 동안 쥐는 점을 로봇 앞(−y)으로 이만큼 더 (cm, 0~5)
+INSERT_DOWN_CM = 3.5             # 2026-11-26 사용자 '잡을 때 위로 가 있다 — 팔을 낮춰' 2 → '밀어 넣기 할 때 좀 더 내리면서' 3.5 → '좀 더 밑으로' 4.5 → '책상에 부딪힘, 팔을 높게' 3.5: INSERT~들기 동안 쥐는 점을 로봇 아래로 이만큼 더 (cm, 0~4)
+INSERT_PUSH_CM = 5.0             # 2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨' 2 → 2026-11-26 '거의 잡는데 깊게 잡았으면' 3.5 → '좀 더 깊게' 5 (시뮬: 잡을 때 손끝이 큐브 중심보다 2.5 cm 로봇 쪽. 실물 범위 + 내리기 5.7 cm 에서 숙이기 35° 그대로): INSERT~들기 동안 쥐는 점을 로봇 앞(−y)으로 이만큼 더 (cm, 0~5)
 _runs = {}                       # run_id -> 결과 (실물 재생이 '화면에 보인 그 궤적'만 보내게)
 
 
@@ -298,6 +298,41 @@ def spot_from_robot(x, y, yaw_deg):
     """로봇 틀 큐브 (x, y m, yaw °) → RL 위치 오프셋 (cm) + 각도. 큐브는 90° 마다 같아 (−45, 45] 로."""
     yaw = (float(yaw_deg) + 45.0) % 90.0 - 45.0
     return {"x_cm": round((y - REF_Y) * 100.0, 1), "y_cm": round(-(x - REF_X) * 100.0, 1), "yaw_deg": round(yaw, 1)}
+
+
+def spot_valid(inf, x_cm, y_cm):
+    """chain.Tables.valid 와 같은 판정 (info 의 격자): (x, y) 를 둘러싼 네 격자점이 모두 학습 범위면 안."""
+    xs, ys, v = inf["xs_cm"], inf["ys_cm"], inf["valid"]
+    if not (xs[0] - 1e-6 <= x_cm <= xs[-1] + 1e-6 and ys[0] - 1e-6 <= y_cm <= ys[-1] + 1e-6):
+        return False
+    fx, fy = (x_cm - xs[0]) / (xs[1] - xs[0]), (y_cm - ys[0]) / (ys[1] - ys[0])
+    for i in {math.floor(fx - 1e-4), math.floor(fx + 1e-4)}:
+        for j in {math.floor(fy - 1e-4), math.floor(fy + 1e-4)}:
+            if 0 <= i <= len(xs) - 2 and 0 <= j <= len(ys) - 2 and v[j][i] and v[j][i + 1] and v[j + 1][i] and v[j + 1][i + 1]:
+                return True
+    return False
+
+
+SPOT_SNAP_CM = 3.0     # 2026-11-26 '정책이 거부됨': 카메라 자리가 학습 범위 끝에서 이만큼 안쪽까지 벗어나면 가장 가까운 안쪽 자리로 (차이는 밀어 넣기 때 손으로)
+SPOT_SNAP_INSET_CM = 0.3   # 끝에 딱 붙지 않게 이만큼 더 안쪽
+
+
+def snap_spot(inf, x_cm, y_cm, max_cm=SPOT_SNAP_CM):
+    """학습 범위 밖 (x, y) cm → 가장 가까운 안쪽 자리 (max_cm 안) 또는 None. 이미 안이면 그대로."""
+    if spot_valid(inf, x_cm, y_cm):
+        return x_cm, y_cm
+    best, step, e = None, 0.25, SPOT_SNAP_INSET_CM
+    n = int(math.ceil(max_cm / step))
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            dx, dy = i * step, j * step
+            d = math.hypot(dx, dy)
+            if d > max_cm or (best is not None and d >= best[0]):
+                continue
+            x, y = x_cm + dx, y_cm + dy
+            if all(spot_valid(inf, x + a, y + b) for a, b in ((0, 0), (e, 0), (-e, 0), (0, e), (0, -e))):
+                best = (d, round(x, 2), round(y, 2))
+    return (best[1], best[2]) if best else None
 
 
 def read_vision(b):

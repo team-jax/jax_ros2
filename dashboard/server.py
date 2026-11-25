@@ -468,7 +468,7 @@ async def api_rl_run(req: Request):
 
 RL_REACH_FIX_M = 0.05  # 2026-11-25 사용자 '좀 더 앞으로 가서 잡게' 2 cm → '2 cm 밀어서 보정' 4 cm → '1 cm 더' 5 cm: 카메라 큐브 → 강화학습 위치를 어깨에서 멀어지는 쪽으로 이만큼 (m).
                        # 본문 reach_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm). 수동 위치(강화학습 탭 x·y 칸)에는 안 붙인다
-RL_SIDE_FIX_M = -0.01  # 2026-11-25 사용자 '집는 걸 로봇 기준 오른쪽으로 2 cm' → '로봇 얼굴 기준 좀 더 오른쪽' 4 cm → 2026-11-26 '약 2 cm 왼쪽으로' 2 cm → '왼쪽으로 1 cm' 1 cm: 카메라 큐브 → 강화학습 위치를 로봇 틀 x 로 (+x = 로봇 왼쪽 → 오른쪽 = −).
+RL_SIDE_FIX_M = 0.0  # 2026-11-26 '이전 로그보다 좀 더 왼쪽' −1 → 0 cm. 예전: 2026-11-25 사용자 '집는 걸 로봇 기준 오른쪽으로 2 cm' → '로봇 얼굴 기준 좀 더 오른쪽' 4 cm → 2026-11-26 '약 2 cm 왼쪽으로' 2 cm → '왼쪽으로 1 cm' 1 cm: 카메라 큐브 → 강화학습 위치를 로봇 틀 x 로 (+x = 로봇 왼쪽 → 오른쪽 = −).
                        # 본문 side_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm, + = 왼쪽)
 RL_MARKER_HEIGHT = True   # 2026-11-25 '카메라하고 좀 더 맞혀야': 큐브 실제 높이를 마커 크기(40 mm)로 잰다 — 받침대가 정책 높이와 2~3 cm 달라도 자리가 맞게
 RL_MARKER_POS_RANGE_M = (-0.04, 0.06)   # 2026-11-26 '카메라 위치를 더 확실히': 마커로 잰 높이(정책보다 아래 +)를 늘 위치에 쓴다 — 이 범위로 잘라서 (잘못 읽음이 몇 cm 넘게 끌지 않게)
@@ -476,7 +476,7 @@ RL_MARKER_REF_DROP_M = 0.0475          # 손 보정값(RL_REACH_FIX_M·RL_SIDE_F
                                        # → 이 높이에서는 예전 자리 그대로, 마커가 달라지면 그 높이 차만큼 같은 시선을 따라 자리를 옮긴다
 RL_MARKER_DOWN = True       # 2026-11-26 '아루코 마커가 작으면 그만큼 보정': 마커로 잰 큐브 높이가 정책보다 낮은 만큼 밀어 넣기 때 손을 더 내린다
 RL_MARKER_DOWN_MAX_CM = 7.0  # (기본 rl_run.INSERT_DOWN_CM 보다 덜 내리지는 않고, 이보다 더 내리지도 않는다 — 시뮬에서 7 cm 까지 손끝 오차 3 mm 안)
-RL_MARKER_DOWN_EXTRA_CM = 1.0   # 2026-11-26 '좀 더 밑으로': 마커 높이 + 이만큼 더 내린다
+RL_MARKER_DOWN_EXTRA_CM = 0.0   # 2026-11-26 '좀 더 밑으로' +1 → '책상에 부딪힘, 팔을 좀 더 높게' 0: 마커 높이 + 이만큼 더 내린다
 RL_MARKER_WARN_MM = 36.0   # 정책 높이로 본 마커가 이보다 작으면 경고만 (2026-11-26 막기 → 경고)
 RL_TABLE_D = 0.4775   # 강화학습 정책이 학습한 책상 윗면 (어깨 축 아래 m) — 실물 책상(0.5575)이면 큐브를 약 8 cm 받침대 위에
 
@@ -574,7 +574,24 @@ def _rl_live_cube(b):
     gx, gy = (c["x"] + fix * c["x"] / r_xy, c["y"] + fix * c["y"] / r_xy) if r_xy > 1e-6 else (c["x"], c["y"])   # 어깨(원점)에서 큐브 쪽으로
     gx += side                                                                                                    # 로봇 기준 옆 (− = 오른쪽)
     spot = rl_run.spot_from_robot(gx, gy, c["yaw_deg"])
-    return {"ok": True, "robot": {"x": c["x"], "y": c["y"], "z": -RL_TABLE_D + 0.025, "yaw_deg": c["yaw_deg"]}, "spot": spot,
+    # 2026-11-26 '정책이 거부됨': 학습 범위 끝에서 조금(SPOT_SNAP_CM) 벗어나면 정책은 가장 가까운 안쪽 자리로 돌리고,
+    # 그 차이는 밀어 넣기 때 손을 옮겨 (insert_push_cm·insert_side_cm 에 더해) 진짜 큐브 자리로 간다
+    snap, push_cm, side_cm = None, rl_run.INSERT_PUSH_CM, rl_run.INSERT_SIDE_CM
+    try:
+        inf = rl_run.info(_ik_dir())
+    except Exception:
+        inf = None
+    if inf and inf.get("ok"):
+        sp = rl_run.snap_spot(inf, spot["x_cm"], spot["y_cm"])
+        if sp is None:
+            warn.append(f"큐브가 정책 학습 범위에서 {rl_run.SPOT_SNAP_CM:g} cm 넘게 벗어남 — 지도의 초록 칸 쪽으로 옮기기")
+        elif sp != (spot["x_cm"], spot["y_cm"]):
+            dsx, dsy = spot["x_cm"] - sp[0], spot["y_cm"] - sp[1]    # 위치 오프셋: x_cm = 로봇 y, y_cm = −로봇 x
+            push_cm = round(min(max(push_cm - dsx, 0.0), 8.0), 1)      # 로봇 앞(−y) = 위치 x_cm 이 작아지는 쪽
+            side_cm = round(min(max(side_cm - dsy, -5.0), 5.0), 1)     # 로봇 왼쪽(+x) = 위치 y_cm 이 작아지는 쪽
+            snap = {"from": [spot["x_cm"], spot["y_cm"]], "to": [sp[0], sp[1]], "push_cm": push_cm, "side_cm": side_cm}
+            spot = {**spot, "x_cm": sp[0], "y_cm": sp[1]}
+    return {"ok": True, "snap": snap, "insert_push_cm": push_cm, "insert_side_cm": side_cm, "robot": {"x": c["x"], "y": c["y"], "z": -RL_TABLE_D + 0.025, "yaw_deg": c["yaw_deg"]}, "spot": spot,
             "reach_fix_cm": round(fix * 100, 1), "side_fix_cm": round(side * 100, 1), "reproject": reproj, "aim": {"x": round(gx, 4), "y": round(gy, 4)},
             "text": p.get("text"), "id": p.get("id"), "warn": warn, "depth_height_cm": h, "marker_mm": mm, "table_d": RL_TABLE_D,
             "insert_down_cm": round(down, 1), "marker_drop_cm": None if drop_cm is None else round(drop_cm, 1)}

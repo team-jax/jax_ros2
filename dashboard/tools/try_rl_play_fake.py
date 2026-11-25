@@ -40,6 +40,14 @@ def main():
     closed = max(P[k0 + still - 1][i] - P[k0][i] for i in fc)
     want = rl_run.RL_GRASP_DWELL_S + rl_run.RL_GRASP_CLOSE_S + rl_run.RL_GRASP_HOLD_S - 0.1
     check("잡을 때 팔 고정 → 손가락 먼저 닫음", still * tq["dt"] >= want and closed > 0.1, f"팔 멈춤 {still * tq['dt']:.2f} s · 손가락 최대 {closed * 57.3:.1f}° 닫힘")
+    # 2026-11-26 '갑자기 책상에 부딪히고 못 잡음': 05:17 실물 기록 (밀기 5 · 내림 6.5 cm) 에서 손끝 98 mm 벗어나고 팔꿈치가 프레임마다 53° 떨었다
+    r517 = rl_run.run(os.environ["JAX_IK_DIR"], {"x_cm": -6.9, "y_cm": -17.2, "yaw_deg": -0.7, "home": False, "limits_deg": server._rl_real_limits(),
+                                                 "insert_push_cm": 5.0, "insert_side_cm": -2.0, "insert_down_cm": 6.5, "insert_tilt_deg": 35.0})
+    ip = (r517.get("summary") or {}).get("insert_push") or {}
+    import math as _m
+    jump = max(abs(b - a) for ra, rb in zip(r517["positions"], r517["positions"][1:]) for a, b in zip(ra[:7], rb[:7])) * 180 / _m.pi
+    check("05:17 값 → 떨지 않음 (프레임 튐 ≤ 12° · 손끝 ≤ 3.5 mm · 고치기 씀)", ip.get("applied") and jump <= 12.0 and ip.get("worst_err_mm", 99) <= 3.5,
+          f"튐 {jump:.1f}° · {ip}")
     check("연결 전 → 거절", not server._rl_play_real({"run_id": rid, "ack_table": True}).get("ok"))
     tmp = Path(tempfile.mkdtemp())
     cal = tmp / "calibration.json"

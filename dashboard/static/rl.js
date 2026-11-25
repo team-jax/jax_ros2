@@ -395,7 +395,10 @@
         const body = { x_cm: num("in-x"), y_cm: num("in-y"), yaw_deg: num("in-yaw"), mass_g: num("in-mass"), home: $("home").checked };
         if (targetOk()) { body.target_x_cm = num("in-tx"); body.target_y_cm = num("in-ty"); }
         const lv = state.liveDown;   // 2026-11-26: 카메라에서 가져온 자리 그대로면 마커 높이만큼 손 내리기도 같이
-        if (lv && lv.x === body.x_cm && lv.y === body.y_cm && lv.yaw === body.yaw_deg) body.insert_down_cm = lv.down;
+        if (lv && lv.x === body.x_cm && lv.y === body.y_cm && lv.yaw === body.yaw_deg) {
+          body.insert_down_cm = lv.down;
+          if (lv.push != null) { body.insert_push_cm = lv.push; body.insert_side_cm = lv.side; }
+        }
         const r = await api("/api/rl/run", body);
         if (!r.ok) { setResult("bad", r.error || "실패"); return; }
         state.run = r;
@@ -556,7 +559,7 @@
       $("in-x").value = r.spot.x_cm; $("in-y").value = r.spot.y_cm; $("in-yaw").value = r.spot.yaw_deg;
       if ($("yaw-range")) $("yaw-range").value = r.spot.yaw_deg;
       state.vision = { x: r.robot.x, y: r.robot.y, yaw: r.robot.yaw_deg };
-      state.liveDown = r.insert_down_cm != null ? { x: num("in-x"), y: num("in-y"), yaw: num("in-yaw"), down: r.insert_down_cm } : null;
+      state.liveDown = r.insert_down_cm != null ? { x: num("in-x"), y: num("in-y"), yaw: num("in-yaw"), down: r.insert_down_cm, push: r.insert_push_cm, side: r.insert_side_cm } : null;
       if (state.viewer && state.viewer.setObject) state.viewer.setObject({ x: r.robot.x, y: r.robot.y, z: r.robot.z, yaw: r.robot.yaw_deg });
       updateNote();
       const valid = isValidSpot(r.spot.x_cm, r.spot.y_cm);

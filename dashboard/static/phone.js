@@ -517,8 +517,9 @@ async function phRL() {
     note("카메라에서 큐브 읽는 중…", "run");
     const c = await post("/api/rl/live_cube", {}, true);
     if (!c.ok) { note("카메라 큐브를 못 씀", "bad", (c.error || "") + ((c.warn || []).length ? " · " + c.warn.join(" · ") : "")); return; }
-    note(`큐브 위치 (${c.spot.x_cm}, ${c.spot.y_cm}) cm · ${c.spot.yaw_deg}° ${c.insert_down_cm != null ? ` · 손 ${c.insert_down_cm} cm 내림` + (c.marker_drop_cm != null ? ` (마커 높이 ${c.marker_drop_cm} cm 아래)` : "") : ""} — 강화학습 시뮬 돌리는 중…`, "run", (c.text || "") + ((c.warn || []).length ? " · ⚠ " + c.warn.join(" · ") : ""));
-    const r = await post("/api/rl/run", { x_cm: c.spot.x_cm, y_cm: c.spot.y_cm, yaw_deg: c.spot.yaw_deg, home: false, ...(c.insert_down_cm != null ? { insert_down_cm: c.insert_down_cm } : {}) }, true);
+    note(`큐브 위치 (${c.spot.x_cm}, ${c.spot.y_cm}) cm · ${c.spot.yaw_deg}° ${c.snap ? ` · 학습 범위 끝으로 옮김 (밀기 ${c.snap.push_cm} · 옆 ${c.snap.side_cm} cm 로 보정)` : ""}${c.insert_down_cm != null ? ` · 손 ${c.insert_down_cm} cm 내림` + (c.marker_drop_cm != null ? ` (마커 높이 ${c.marker_drop_cm} cm 아래)` : "") : ""} — 강화학습 시뮬 돌리는 중…`, "run", (c.text || "") + ((c.warn || []).length ? " · ⚠ " + c.warn.join(" · ") : ""));
+    const r = await post("/api/rl/run", { x_cm: c.spot.x_cm, y_cm: c.spot.y_cm, yaw_deg: c.spot.yaw_deg, home: false, ...(c.insert_down_cm != null ? { insert_down_cm: c.insert_down_cm } : {}),
+      ...(c.insert_push_cm != null ? { insert_push_cm: c.insert_push_cm, insert_side_cm: c.insert_side_cm } : {}) }, true);
     if (!r.ok) { note("강화학습 시뮬 실패", "bad", r.error || ""); return; }
     const sm = r.summary || {};
     if (!sm.done) { note("시뮬에서 못 집음 — 실물로 안 보냄", "bad", (sm.fail_reason || "") + (sm.valid_spot === false ? " · 정책이 학습한 범위 밖 — 큐브를 옮기기" : "")); return; }
@@ -542,7 +543,8 @@ async function phRL() {
       const why = [...(st.not_homed || []).map((n) => n + " 원점 없음"), ...(st.far || []), ...(st.clip_big || []), st.calib_dirty ? "보정 저장 안 함" : "", (st.playback || {}).running ? "다른 재생 중" : ""].filter(Boolean);
       note("시뮬 성공 — 아직 실물로 못 보냄", "warn", why.join(" · ") || st.why || ""); return;
     }
-    if (!confirm(`⚠ 실물 팔로 강화학습 궤적을 재생한다 (큐브 ${c.spot.x_cm}, ${c.spot.y_cm} cm · ${c.spot.yaw_deg}°).\n\n` +
+    const ipw = (sm.insert_push && sm.insert_push.applied === false) ? `⚠ 밀기·내리기·숙이기를 못 씀 — ${sm.insert_push.why || ""}\n\n` : "";
+    if (!confirm(`⚠ 실물 팔로 강화학습 궤적을 재생한다 (큐브 ${c.spot.x_cm}, ${c.spot.y_cm} cm · ${c.spot.yaw_deg}°).\n\n` + ipw +
       "책상 앞 끝이 어깨에서 22.5 cm, 큐브 윗면 높이가 정책 장면(어깨 아래 47.75 cm 책상)과 맞는가? (실물 책상이면 약 8 cm 받침대)\n열린 고리 — 실물에서 큐브가 달라도 정책이 다시 고르지 않는다. 팔 주변을 비웠나요?")) { note("취소함", ""); return; }
     let pr = await post("/api/rl/play_real", { run_id: r.run_id, ack_table: true, max_speed: 30 }, true);
     if (!pr.ok && pr.need_force) {

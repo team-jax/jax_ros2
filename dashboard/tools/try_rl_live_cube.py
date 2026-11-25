@@ -29,6 +29,14 @@ def check(name, ok, detail=""):
 
 
 # ---------------------------------------------------------------- 1) 판단만 (가짜 live_api.cubes)
+def _pre_snap(r):
+    """학습 범위 끝으로 옮기기 전 위치 (2026-11-26 snap) — 옮겼으면 snap.from"""
+    sp = dict(r.get("spot") or {})
+    if r.get("snap"):
+        sp["x_cm"], sp["y_cm"] = r["snap"]["from"]
+    return sp
+
+
 def unit():
     import live_api
     import server
@@ -46,10 +54,10 @@ def unit():
         rr = _m.hypot(-0.018, -0.265)
         sx = server.RL_SIDE_FIX_M
         want = _rl.spot_from_robot(-0.018 * (1 + fx / rr) + sx, -0.265 * (1 + fx / rr), 20.0)
-        check(f"정상 → 위치 (어깨에서 {fx * 100:.0f} cm 더 앞, 옆 {sx * 100:+.0f} cm = 로봇 오른쪽)", r.get("ok") and r["spot"] == want
+        check(f"정상 → 위치 (어깨에서 {fx * 100:.0f} cm 더 앞, 옆 {sx * 100:+.0f} cm = 로봇 오른쪽)", r.get("ok") and _pre_snap(r) == want
               and r.get("reach_fix_cm") == round(fx * 100, 1) and r.get("side_fix_cm") == round(sx * 100, 1), str(r.get("spot") or r))
         r0 = server._rl_live_cube({"reach_fix_cm": 0, "side_fix_cm": 0})
-        check("reach_fix_cm 0 → 고침 없음", r0.get("ok") and r0["spot"] == {"x_cm": 2.0, "y_cm": -3.0, "yaw_deg": 20.0}, str(r0.get("spot")))
+        check("reach_fix_cm 0 → 고침 없음", r0.get("ok") and _pre_snap(r0) == {"x_cm": 2.0, "y_cm": -3.0, "yaw_deg": 20.0}, str(r0.get("spot")))
         r9 = server._rl_live_cube({"reach_fix_cm": 99})
         check("reach_fix_cm 99 → 5 cm 로 자름", r9.get("ok") and r9.get("reach_fix_cm") == 5.0, str(r9.get("reach_fix_cm")))
         live_api.cubes = fake(dict(base, blocked=True, block="층이 확실하지 않음", depth={"height_cm": -8.1}), [{"id": 1, "marker_mm": 39.0}])
@@ -88,7 +96,7 @@ def unit():
         xp, yp, _ = server._rl_reproject(-0.018, -0.265, 0.5575, server.RL_TABLE_D)
         xs, ys = xp + (xa - xr), yp + (ya - yr)       # 2026-11-26: 손 보정을 맞춘 마커 높이(4.75 cm 아래)에서는 예전 자리, 그 차만큼만 옮긴다
         check("0.5575 로 잰 큐브 → 마커(45.1 mm)로 잰 실제 높이로 다시 투영 (서버 높이는 안 바꿈)", r.get("ok") and seen == [None] and r.get("reproject")
-              and abs(r["reproject"]["to_d"] - mid) < 2e-4 and r["spot"] == __import__("rl_run").spot_from_robot(round(xs, 4), round(ys, 4), 20.0)
+              and abs(r["reproject"]["to_d"] - mid) < 2e-4 and _pre_snap(r) == __import__("rl_run").spot_from_robot(round(xs, 4), round(ys, 4), 20.0)
               and abs(r["marker_mm"] - round(45.1 * ratio, 1)) < 1e-6, f"투영 {r.get('reproject')} · 정책 높이로 본 마커 {r.get('marker_mm')} mm")
         live_api.cubes = lambda td=None, pick_id=None: {"ok": True, "stale": False, "mode": "camera", "table": {"d": 0.5575},
                                                          "cubes": [{"id": 1, "marker_mm": 39.0}], "pick": dict(base)}
@@ -124,6 +132,16 @@ def unit():
 
 
 # ---------------------------------------------------------------- 2) 끝에서 끝 (가상 모드 시험 서버)
+
+def snap():
+    """2026-11-26 '정책이 거부됨': 학습 범위 끝에서 조금 벗어난 카메라 자리 → 안쪽으로, 차이는 밀어 넣기로."""
+    import rl_run
+    inf = rl_run.info(os.environ["JAX_IK_DIR"])
+    check("범위 안 자리 → 그대로", rl_run.snap_spot(inf, -5.0, -9.0) == (-5.0, -9.0))
+    s = rl_run.snap_spot(inf, -7.0, -21.5)
+    check("1 cm 밖 (05:43 실물에서 거절된 자리) → 3 cm 안 안쪽", s is not None and rl_run.spot_valid(inf, *s) and ((s[0] + 7.0) ** 2 + (s[1] + 21.5) ** 2) ** 0.5 <= 3.0, str(s))
+    check("멀리 밖 → None (옮기지 않음)", rl_run.snap_spot(inf, -14.0, -21.0) is None)
+
 def free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -166,7 +184,7 @@ def e2e():
         call("/api/live/scene", {"op": "add", "x": 0.05, "y": -0.30, "yaw_deg": 70})      # 1번: yaw 70 → −20 으로 접혀야
         st, r = call("/api/rl/live_cube", {"reach_fix_cm": 0, "side_fix_cm": 0})
         want = rl_run.spot_from_robot(-0.018, -0.265, 20)
-        check("큐브 0 → 위치 = spot_from_robot", st == 200 and r.get("ok") and r["spot"] == want and r.get("id") == 0, str((r or {}).get("spot")))
+        check("큐브 0 → 위치 = spot_from_robot", st == 200 and r.get("ok") and _pre_snap(r) == want and r.get("id") == 0, str((r or {}).get("spot")))
         st, r1 = call("/api/rl/live_cube", {"pick": 1, "reach_fix_cm": 0, "side_fix_cm": 0})
         check("pick 1 → 큐브 1, 각 70° → −20° 로 접음", st == 200 and r1.get("ok") and r1.get("id") == 1 and abs(r1["spot"]["yaw_deg"] + 20) < 1e-6,
               str((r1 or {}).get("spot")))
@@ -187,6 +205,7 @@ def e2e():
 
 if __name__ == "__main__":
     unit()
+    snap()
     e2e()
     print("통과" if not FAIL else f"실패 {len(FAIL)}: {FAIL}")
     sys.exit(1 if FAIL else 0)
