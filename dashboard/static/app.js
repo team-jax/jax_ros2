@@ -1692,6 +1692,49 @@ function angleRow(j) {
     el("div", { class: "jn" }, jLabel(j.joint)), r.range, r.num, r.cur, r.send, r.why);
   return r;
 }
+// ---------- 빠른 손가락 제어 (각도 제어 탭 손가락 카드 맨 위, 2026-11-25 사용자) ----------
+// 손가락 첫 마디 3개를 한 번에: 자세 버튼(펴기·벌리기·쥐기), '쥐는 정도' 슬라이더 하나, ±5° 버튼. 마디 2 는 0° (곧게) 로 같이 보낸다.
+// 보내는 길은 위 슬라이더의 '보내기' 와 똑같다 (sendJoints: 보낼 수 있는지 검사 + 첫 확인창 + 램프). 값은 아래 슬라이더에도 그대로 보인다.
+const FQ_J1 = ["finger1_joint1", "finger2_joint1", "finger3_joint1"], FQ_J2 = ["finger1_joint2", "finger2_joint2", "finger3_joint2"];
+const FQ_POSES = [["펴기 0°", 0, "손가락을 원점(곧게)으로"], ["조금 벌리기 −15°", -15, "계획의 HOME 벌림과 같음"],
+                  ["크게 벌리기 −60°", -60, "큐브 위에서 내려갈 때와 같음 (서보 끝에서 멈출 수 있다)"], ["쥐기 +5°", 5, "곧게를 지나 눌러 쥠 — 역기구학 실물 재생의 더 쥐기와 비슷"]];
+function fingerQuick(cal) {
+  const has = FQ_J1.filter((n) => cal[n]);
+  if (!has.length) return el("div");
+  const lo = Math.max(...has.map((n) => (cal[n].cmd_range_deg || [-90, 90])[0])), hi = Math.min(...has.map((n) => (cal[n].cmd_range_deg || [-90, 90])[1]));
+  const send = (v1) => {      // 첫 마디 3개 = v1 (각자 범위로 자름), 마디 2 = 0
+    const names = [];
+    for (const n of has) { setVal(n, clampR(cal[n], v1)); names.push(n); }
+    for (const n of FQ_J2) if (cal[n]) { setVal(n, clampR(cal[n], 0)); names.push(n); }
+    renderAngles();
+    sendJoints(names);
+    num.value = String(Math.round(v1 * 10) / 10); rng.value = v1; rangeFill(rng);
+  };
+  const cur = () => { const v = has.map((n) => A.val[n] ?? 0); return v.reduce((a, b) => a + b, 0) / v.length; };
+  const rng = el("input", { type: "range", min: Math.min(lo, -60), max: Math.max(hi, 10), step: 1, value: 0, "aria-label": "쥐는 정도 (첫 마디 3개)" });
+  const num = el("input", { type: "number", min: rng.min, max: rng.max, step: 1, value: 0, style: "width:80px" });
+  const live = el("input", { type: "checkbox", checked: "" });
+  rng.addEventListener("input", () => { num.value = rng.value; for (const n of has) setVal(n, clampR(cal[n], parseFloat(rng.value))); renderAngles(); });
+  rng.addEventListener("change", () => { if (live.checked) send(parseFloat(rng.value)); });     // 손을 놓을 때 한 번 보냄
+  num.addEventListener("change", () => { const v = parseFloat(num.value); if (Number.isFinite(v)) { rng.value = v; rangeFill(rng); if (live.checked) send(v); } });
+  const poses = el("div", { class: "row", style: "flex-wrap:wrap;gap:6px;margin:6px 0" },
+    ...FQ_POSES.map(([lab, v, tip]) => el("button", { class: "btn line small", title: tip, onclick: () => send(v) }, lab)),
+    el("button", { class: "btn line small", title: "첫 마디 3개를 5° 더 벌림", onclick: () => send(cur() - 5) }, "−5° 벌림"),
+    el("button", { class: "btn line small", title: "첫 마디 3개를 5° 더 오므림", onclick: () => send(cur() + 5) }, "+5° 오므림"));
+  const rotRow = cal.finger_rotation ? el("div", { class: "row", style: "flex-wrap:wrap;gap:6px;margin:4px 0" },
+    el("span", { class: "help", style: "margin:0" }, "손가락 회전"),
+    el("button", { class: "btn line small", onclick: () => { setVal("finger_rotation", clampR(cal.finger_rotation, 0)); renderAngles(); sendJoints(["finger_rotation"]); } }, "0° (HOME·역기구학)"),
+    el("button", { class: "btn line small", onclick: () => { setVal("finger_rotation", clampR(cal.finger_rotation, 180)); renderAngles(); sendJoints(["finger_rotation"]); } }, "180° (강화학습 시작)")) : null;
+  rangeFill(rng);
+  return el("div", { class: "fquick", style: "border:1px solid var(--line, #e5e8eb);border-radius:12px;padding:10px 12px;margin:6px 0 10px" },
+    el("div", { style: "font-weight:700;margin-bottom:4px" }, "빠른 손가락 제어 (첫 마디 3개 같이 · 마디 2 는 곧게)"),
+    poses,
+    el("div", { class: "row", style: "gap:8px;align-items:center;margin:4px 0" }, el("span", { class: "help", style: "margin:0;min-width:64px" }, "쥐는 정도"), rng, num, el("span", { class: "help", style: "margin:0" }, "°")),
+    el("label", { class: "help", style: "display:flex;gap:6px;align-items:center;margin:2px 0" }, live, "슬라이더를 놓으면 바로 보내기 (끄면 아래 '보내기'·'바뀐 것 보내기' 로)"),
+    rotRow,
+    el("div", { class: "help", style: "margin:4px 0 0" }, "− = 벌림, + = 오므림 (0° = 원점, 곧게). 서보 범위 밖은 끝에서 멈춘다. 보내기 전 검사·확인창은 위와 같다."));
+}
+
 function buildAngles() {
   const cal = calJ(), box = $("#angles");
   if (!Object.keys(cal).length) return false;
@@ -1712,6 +1755,7 @@ function buildAngles() {
   const ak = Object.values(cal).filter((j) => j.motor === "ak45").map((j) => j.joint);
   const fbody = el("div", {},
     el("label", { class: "help", style: "display:flex;gap:6px;align-items:center;margin:6px 0" }, linkBox, "손가락 1·2·3 같이 움직이기"));
+  fbody.append(fingerQuick(cal));   // 2026-11-25: 빠른 손가락 제어 (아래 슬라이더·보내기는 그대로)
   for (const [label, names] of FINGER_SETS) {
     fbody.append(el("div", { class: "fset" }, label));
     for (const n of names) if (cal[n]) { const r = A.rows[n] = angleRow(cal[n]); fbody.append(r.root); }
@@ -1971,7 +2015,7 @@ function buildGoHome() {
   GH.btn = el("button", { class: "btn", onclick: goHome }, "⌂ HOME(원점 자세)으로 가기");
   GH.stop = el("button", { class: "btn line", onclick: stopAll }, "멈춤");
   GH.servo = el("button", { class: "btn line", onclick: sendServosHome,
-    title: "서보는 위치 피드백이 없어 한 번도 안 보낸 서보는 재생·HOME 이 거절한다. 계획 시작 값(손목 3개 0°, 손가락 벌림 −15°/0°, 손가락 회전 0°)을 한 번에 보낸다 — 램프 없이 바로 그 각으로 간다" },
+    title: "서보는 위치 피드백이 없어 한 번도 안 보낸 서보는 재생·HOME 이 거절한다. 서보 10개를 모두 원점(0° = 보정의 원점 각)으로 한 번에 보낸다 — 램프 없이 바로 그 각으로 간다" },
     "서보 한 번에 보내기");
   GH.vb = el("span", { class: "vbadge", hidden: true }, "가상");
   GH.note = el("div", { class: "note" });
@@ -1998,11 +2042,13 @@ function renderGoHome() {
 }
 // 계획·HOME 시작 서보 값 (sim °): 손목 3개 0, 손가락 = IK env FINGER_OPEN (첫 마디 −0.26 rad, 둘째 0) = pick_plan open_exit
 // finger_rotation 0° = 손가락 3 이 손가락 1·2 와 마주 보는 자세 (역기구학 계획이 가정하는 방향). 강화학습 재생은 이 서보를 180° 로 돌려 두므로 여기서 0 으로 되돌린다.
+// 서보 10개 모두 원점 0° (calibration 의 zero_deg 그 각) — 2026-11-25 사용자: 각자 원점으로. 역기구학 계획은 손가락 벌림 −15° 로 시작하지만
+// 실물 재생은 손가락 서보가 30° 안이면 그 각까지 램프로 간다 (real_arm.FINGER_START_TOL_DEG)
 const SERVO_HOME_DEG = { wrist_pitch: 0, wrist_yaw: 0, hand_roll: 0,
-  finger1_joint1: -14.9, finger1_joint2: 0, finger2_joint1: -14.9, finger2_joint2: 0, finger3_joint1: -14.9, finger3_joint2: 0,
+  finger1_joint1: 0, finger1_joint2: 0, finger2_joint1: 0, finger2_joint2: 0, finger3_joint1: 0, finger3_joint2: 0,
   finger_rotation: 0 };
 async function sendServosHome() {
-  if (!confirm((VIRT() ? "(가상) " : "⚠ 실물 서보가 움직인다.\n\n") + "서보 10개(손목 3개 0°, 손가락 벌림, 손가락 회전 0°)를 한 번에 보낼까요?\n" +
+  if (!confirm((VIRT() ? "(가상) " : "⚠ 실물 서보가 움직인다.\n\n") + "서보 10개를 모두 원점(0°)으로 한 번에 보낼까요? (각 서보의 보정 원점 각으로 간다)\n" +
     "램프 없이 그 각으로 바로 간다 (빠르게 튄다) — 손 주변을 비우세요.")) return;
   const r = await post("/api/joint/send", { joints: SERVO_HOME_DEG, instant: true });   // 서보만 램프 없이 바로 (2026-11-25 사용자)
   if (r.ok) toast(r.msg || "서보 보냄"); else toast(r.error || "못 보냄", "error");

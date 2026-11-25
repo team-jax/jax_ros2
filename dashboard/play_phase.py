@@ -35,6 +35,7 @@ MARK_TEXT = {
     "exit_back": "HOME 으로 돌아가는 중",
     "home0": "HOME 으로 돌아가는 중",
     "home": "HOME 으로 돌아가는 중",
+    "fingers_home": "손가락을 원점(0°)으로",
 }
 HOME_TEXT = {   # plan_home (HOME 버튼)
     "yaw0": "HOME 으로: 팔 돌림 0 으로 맞추는 중",

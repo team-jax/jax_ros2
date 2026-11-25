@@ -63,6 +63,7 @@ try:   # 실물 램프 가속(°/s²) — real_arm.DEFAULTS 한 곳에서 읽는
 except Exception:   # real_arm 을 못 읽는 곳(팀 PC 등)에선 보수적으로 같은 기본값 — 경고를 남긴다
     MAX_ACC = 90.0
     print("pick_plan: real_arm.DEFAULTS 를 못 읽어 MAX_ACC 90 °/s² 가정", file=sys.stderr)
+HOME_FINGERS_ORIGIN = True   # plan_home 끝 손가락 = 원점 0° (False = 예전 벌림 −15°)
 PICK_DROP_M = 0.0            # 0 (2026-11-25 오후): '손이 8 cm 위에서 멈춤' 의 원인 = 실물 책상이 어깨 아래 0.557 m (기본 0.4775 보다 8 cm 낮음, 폰 IMU·큐브
                              # 마커로 잼) → 책상 높이 d 를 실제 값으로 넣으면 집기·놓기·HOME 이 모두 맞는다. 둘을 같이 쓰면 16 cm 내려간다.
                              # (예전 0.08: 실물에서 손이 큐브보다 약 8 cm 위에서 멈춤 → 집는 자리의 큐브를 모델 책상보다 이만큼 아래로 보고
@@ -1207,8 +1208,50 @@ def plan(a):
     if r["status"] != "playable" and grasp == "auto":
         r["grasp"]["tried"] = tried
         r["reason"] = f"{r.get('reason')} · 자동: 수직·수평도 안 됨 (수직: {tried.get('vertical')} / 수평: {tried.get('horizontal')})"
+    if r.get("status") == "playable" and HOME_FINGERS_ORIGIN and r.get("positions"):
+        _fingers_from_origin(r)
+        _fingers_to_origin(r)
     r["plan_s"] = round(time.time() - t0, 2)
     return r
+
+
+FINGERS_HOME_S = 1.0     # 계획 끝(HOME)에서 손가락을 원점 0° 로 돌리는 시간
+
+
+def _fingers_from_origin(r):
+    """계획 시작을 손가락 원점 0° 에서 (HOME = 다 0° 와 같게) — 첫 길(HOME → 나가기 경유점, marks exit_out) 동안 계획 값(벌림 −15°)까지
+    천천히 벌린다. 2026-11-25 사용자: '집으러 가기' 를 누르면 손가락이 갑자기 벌어짐 (첫 프레임이 −15° 라 서보가 0.2 초에 15° 튀었다).
+    그 구간은 큐브에서 멀어 손가락↔큐브 검사와 상관없다."""
+    names, pos = r["joint_names"], r["positions"]
+    fi = [k for k, n in enumerate(names) if n.startswith("finger") and n != "finger_rotation"]
+    mk = r.get("marks") or {}
+    end = int(mk.get("exit_out") or mk.get("above_pick") or 0)
+    if not fi or end <= 0 or end >= len(pos):
+        return
+    for i in range(0, end + 1):
+        w = i / end
+        w = w * w * (3.0 - 2.0 * w)          # smoothstep: 처음·끝 천천히
+        for k in fi:
+            pos[i][k] = pos[i][k] * w
+
+
+def _fingers_to_origin(r):
+    """계획 끝에 손가락을 벌림(−15°)에서 원점 0° 로 (2026-11-25 사용자: 실행 뒤 HOME = 다 0°, '서보 한 번에 보내기' 와 같게).
+    팔은 마지막 자세(HOME) 그대로, 손가락만 FINGERS_HOME_S 동안 0° 로 — 다음 실행의 시작 자세와 HOME 이 같아진다."""
+    names, pos, dt = r["joint_names"], r["positions"], float(r.get("dt") or DT)
+    fi = [k for k, n in enumerate(names) if n.startswith("finger") and n != "finger_rotation"]
+    last = list(pos[-1])
+    if not fi or max(abs(last[k]) for k in fi) < math.radians(0.5):
+        return
+    m = max(1, round(FINGERS_HOME_S / dt))
+    for i in range(1, m + 1):
+        w = smooth(i / m) if "smooth" in globals() else i / m
+        f = list(last)
+        for k in fi:
+            f[k] = last[k] * (1.0 - w)
+        pos.append(f)
+    if isinstance(r.get("marks"), dict):
+        r["marks"]["fingers_home"] = len(pos) - 1
 
 
 def _stack_args(a, P):
@@ -1646,9 +1689,11 @@ def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
     if miss:
         return {**out, "status": "unreachable", "reason": "지금 각을 모르는 관절: " + ", ".join(miss) + " (AK45 피드백이 없음)"}
     q0 = np.radians([float(now_deg[n]) for n in s.arm])
-    f0 = np.array([math.radians(float(now_deg[n])) if n in now_deg else float(o) for n, o in zip(s.fingers, P.open_exit)])
+    # HOME 의 손가락 = 원점 0° (2026-11-25 사용자: 서보 한 번에 보내기·HOME 모두 각 원점으로 — 예전엔 벌림 −15° 로 가서 HOME 마다 손가락이 벌어졌다)
+    fh = np.zeros_like(P.open_exit) if HOME_FINGERS_ORIGIN else P.open_exit
+    f0 = np.array([math.radians(float(now_deg[n])) if n in now_deg else float(o) for n, o in zip(s.fingers, fh)])
     home = P.exit[0]
-    if float(np.degrees(np.abs(q0 - home)).max()) <= HOME_AT_DEG and float(np.degrees(np.abs(f0 - P.open_exit)).max()) <= HOME_AT_DEG:
+    if float(np.degrees(np.abs(q0 - home)).max()) <= HOME_AT_DEG and float(np.degrees(np.abs(f0 - fh)).max()) <= HOME_AT_DEG:
         return {**out, "status": "already", "reason": "이미 HOME (모든 관절 0)"}
     if not P.exit_ok:
         return {**out, "status": "unreachable", "reason": P.exit_why}
@@ -1691,7 +1736,7 @@ def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
         frames = [(q0.copy(), f0.copy())]
         ends = []                   # 구간마다 끝 프레임 → marks (재생 중 '지금 무슨 동작', play_phase.HOME_TEXT)
         for i, qs in enumerate(legs):
-            frames += P.frames(qs, f0 if i == 0 else P.open_exit, P.open_exit, sp)
+            frames += P.frames(qs, f0 if i == 0 else fh, fh, sp)
             ends.append(len(frames) - 1)
         mk = {"start": 0}
         if pre:

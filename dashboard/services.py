@@ -43,7 +43,7 @@ def _default_ws():
 WS = os.environ.get("JAX_WS") or _default_ws()
 ROS_DISTRO = os.environ.get("JAX_ROS_DISTRO") or os.environ.get("ROS_DISTRO") or "jazzy"
 CAN_IFACE = "can0"   # ak45_node 의 CAN 이름은 컴파일 타임 상수 can0 (README)
-CAN_UP_CMD = f"sudo ip link set {CAN_IFACE} up type can bitrate 1000000"
+CAN_UP_CMD = f"sudo ip link set {CAN_IFACE} txqueuelen 1000 up type can bitrate 1000000"   # txqueuelen 1000: 기본 10 이면 한 제어 주기의 프레임 묶음에 송신 큐가 차 ENOBUFS 로 프레임이 빠졌다 (2026-11-25, 로그 1156번)
 
 
 @dataclass

@@ -65,6 +65,10 @@ def left_panel(img):
     return img
 
 
+SMOOTH_N = 3            # 큐브 자리 = 최근 이만큼 프레임의 중앙값 (2026-11-25 사용자 '카메라 너무 불안정': 1 장/초라 한 장만 흔들려도 자리가 튀었다)
+SMOOTH_S = 4.0          # 그보다 오래된 프레임은 안 씀
+SMOOTH_JUMP_M = 0.03    # 새 자리가 이만큼 넘게 다르면 큐브를 옮긴 것 — 지난 것을 버리고 새로 (늦게 따라가지 않게)
+HOLD_S = 2.5            # 큐브가 한 장 빠지면 (손·흔들림) 이 안에서는 직전 결과를 그대로 ('held')
 LIVE_MAX_LEVELS = 1     # 큐브 층 후보 수 (phone_detect max_levels). 2026-11-25 탑 쌓기를 없애 1 = 늘 책상 위 — 기준 종이 없이 층을 고르면
                         # 큐브마다 마커 크기 오차로 한 층 틀렸다. 탑 쌓기를 되살리면 phone_detect.MAX_LEVELS 로
 _UNRECT = {"key": None, "maps": None, "why": None}
@@ -273,6 +277,7 @@ class Live:
         self.inject = None         # 시험: (BGR 배열, 프레임 시각) — 파일 대신
         self.unrect_why = None     # inference.png 정류 되돌리기를 못 한 이유 (unrectify)
         self.imu_fix_deg = None    # 이번 프레임에 중력 센서로 고친 기울기 (°), 못 고쳤으면 None
+        self.hist = {}             # 큐브(번호·뎁스)마다 최근 (t, x, y, yaw) — 자리 고르기 (_smooth)
 
     def start(self):
         if self.thread is None:
@@ -315,6 +320,8 @@ class Live:
                     raw = f.read()
             except OSError:
                 return None
+            if name == "inference.png" and not raw.rstrip(b"\0").endswith(b"IEND\xaeB`\x82"):
+                return None          # 폰 프로그램이 쓰는 중인 반쪽 PNG — 디코드하지 않는다 (libpng 경고가 로그에 쌓였다), 다음 번에
             img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
             if img is None:          # 쓰는 중 — 다음 번에
                 return None
@@ -354,8 +361,9 @@ class Live:
         now = time.monotonic()
         multi = PD.detect_cubes(img, cam_cfg)          # 큐브 여러 개 (4x4 ID 0~4, 층, 기울기)
         # 뎁스 후보가 여럿이면 휴대폰 탭이 집을 큐브 (ArUco ID 0, 없으면 처음 본 큐브) 쪽을 고르게 (2026-11-25 '헷갈림' 고침)
-        aru = [c for c in multi.get("cubes", []) if c.get("id") == PD.CUBE_ID] or list(multi.get("cubes", []))[:1]
+        aru = [c for c in multi.get("cubes", []) if c.get("id") == PD.CUBE_ID] or sorted(multi.get("cubes", []), key=lambda c: c["id"])[:1]
         prefer = (aru[0]["x"], aru[0]["y"]) if aru else None
+        cam_cfg["cube_id"] = aru[0]["id"] if aru else PD.CUBE_ID      # 0번이 없으면 보이는 큐브 (가장 작은 번호) 를 집는다 (2026-11-25)
         dep = DP.evaluate(dcfg, td, time.time(), self.prev["pos"] if now - self.prev["t"] <= 3.0 else None, prefer=prefer)
         if dep.get("ok"):
             self.prev.update(pos=dep.pop("pos"), t=now)
@@ -376,6 +384,17 @@ class Live:
             else:
                 cubes.append({"id": None, "x": p["cube"]["x"], "y": p["cube"]["y"], "yaw_deg": p["cube"]["yaw_deg"], "level": 0,
                               "source": "depth", "usable": p.get("usable", True)})
+        if src != "test":   # 실물 영상만 (시험 주입은 한 장씩 그대로)
+            for c in cubes:
+                self._smooth(("aruco", c["id"]) if c.get("id") is not None else ("depth",), c, t)
+            fc = fused.get("cube") if fused.get("ok") else None
+            if fc:
+                fused = {**fused, "cube": self._smooth(("fused", cam_cfg.get("cube_id") if fused.get("used") == "aruco" else "depth"), dict(fc), t)}
+            prev = self.res
+            if not cubes and prev and prev.get("cubes") and t - prev.get("t_seen", prev.get("t_frame", 0)) <= HOLD_S and prev.get("td") == td:
+                cubes = [dict(c, held=True) for c in prev["cubes"]]          # 한 장 빠짐 → 직전 결과 (지도·집기가 깜빡이지 않게)
+                fused = prev.get("fused") or fused
+                multi = {**multi, "ok": True, "reason": None, "warn": list(multi.get("warn") or []) + ["큐브가 이번 프레임에 안 보여 직전 자리를 씀"]}
         jpeg = None
         if vis is None:
             vis = img
@@ -391,9 +410,29 @@ class Live:
             self.res = {"t_frame": t, "t_done": time.time(), "src": src, "frame_n": self.n, "cubes": cubes,
                         "refs": multi.get("refs", []), "warn": multi.get("warn", []), "reason": None if multi.get("ok") else multi.get("reason"),
                         "level_unsure": bool(multi.get("level_unsure")), "fused": fused, "depth_age_s": dep.get("age_s"), "td": td,
-                        "camera_src": (multi.get("camera") or {}).get("src")}
+                        "camera_src": (multi.get("camera") or {}).get("src"), "fused_id": cam_cfg.get("cube_id", PD.CUBE_ID),
+                        "t_seen": t if cubes and not any(c.get("held") for c in cubes) else (self.res or {}).get("t_seen", t)}
             self.jpeg = jpeg
             self.td_done = td
+
+    def _smooth(self, key, c, t):
+        """c (x, y, yaw_deg 가 있는 dict) 를 최근 SMOOTH_N 프레임의 중앙값으로 바꾼다 (yaw 는 90° 주기 평균). 옮겼으면(SMOOTH_JUMP_M) 새로."""
+        h = self.hist.setdefault(key, deque(maxlen=SMOOTH_N))
+        while h and t - h[0][0] > SMOOTH_S:
+            h.popleft()
+        if h:
+            mx = sorted(p[1] for p in h)[len(h) // 2]
+            my = sorted(p[2] for p in h)[len(h) // 2]
+            if math.hypot(c["x"] - mx, c["y"] - my) > SMOOTH_JUMP_M:
+                h.clear()
+        h.append((t, float(c["x"]), float(c["y"]), float(c.get("yaw_deg") or 0.0)))
+        xs, ys = sorted(p[1] for p in h), sorted(p[2] for p in h)
+        s4 = sum(math.sin(math.radians(4 * p[3])) for p in h)
+        c4 = sum(math.cos(math.radians(4 * p[3])) for p in h)
+        c["x"], c["y"] = round(xs[len(xs) // 2], 4), round(ys[len(ys) // 2], 4)
+        c["yaw_deg"] = round(math.degrees(math.atan2(s4, c4)) / 4, 1)
+        c["n_avg"] = len(h)
+        return c
 
     def stale_s(self):
         """기다릴 한계: live.jpg 면 STALE_S, inference.png 면 그 저장 간격의 1.6 배 (STALE_S ~ STALE_MAX_S)."""
@@ -409,18 +448,33 @@ class Live:
 
 
 # ---------------------------------------------------------------- 응답
+MARKER_BLOCK_FRAC = 0.15   # 탑 쌓기 없앤 뒤 (LIVE_MAX_LEVELS 1): ArUco 만으로 집을 때 마커 한 변이 40 mm 에서 이만큼 넘게 다르면 막음
+                           # (2026-11-25 사용자 '너무 빡빡': 뎁스와 3 mm 로 맞는데 마커 44 mm (10%) 라 '층이 확실하지 않음' 으로 막혔다)
+
+
+def _unsure_blocks(c, res, with_depth):
+    """큐브 c 를 '층·자리가 확실하지 않음' 으로 막을지. 탑 쌓기가 있을 때(LIVE_MAX_LEVELS > 1)는 예전 그대로.
+    없으면 큐브는 늘 책상 위 — 뎁스가 같은 자리를 확인했으면 안 막고, ArUco 만이면 마커 크기가 MARKER_BLOCK_FRAC 넘게 틀릴 때만."""
+    if LIVE_MAX_LEVELS > 1:
+        return bool(c.get("unsure") or res.get("level_unsure"))
+    if with_depth:
+        return False
+    mm = c.get("marker_mm")
+    return mm is not None and abs(mm - PD.CUBE_MARKER_MM) > MARKER_BLOCK_FRAC * PD.CUBE_MARKER_MM
+
+
 def _pick_camera(res, stale, pick_id):
     """휴대폰 탭이 집을 큐브 하나 (phone_fuse 모양): ID 를 고르지 않았거나 PD.CUBE_ID (0) 면 ArUco 0 + 뎁스를 합친 것, 다른 ID 면 그 ArUco 큐브."""
     if res is None or stale:
         return {"ok": False, "stale": True, "warn": [], "note": [], "sources": [],
                 "reason": "영상 없음 — 폰 프로그램이 꺼져 있거나 프레임이 멈춤 (새 프레임이 들어와야 집는다)"}
-    if pick_id is not None and pick_id != PD.CUBE_ID:
+    if pick_id is not None and pick_id != res.get("fused_id", PD.CUBE_ID):
         c = next((c for c in res["cubes"] if c["id"] == pick_id), None)
         if c is None:
             return {"ok": False, "warn": [], "note": [], "sources": [], "reason": f"큐브 {pick_id} 가 지금 프레임에 안 보임"}
         out = {"ok": True, "id": pick_id, "cube": {"x": c["x"], "y": c["y"], "yaw_deg": c["yaw_deg"]}, "used": "aruco", "sources": ["aruco"],
                "text": f"출처: ArUco (큐브 {pick_id})", "blocked": False, "block": "", "warn": list(res.get("warn") or []), "note": [], "check": None}
-        if c.get("unsure") or res.get("level_unsure"):   # 층·자리가 확실하지 않음 (쌓인 큐브가 책상 위로 읽혔을 수 있다)
+        if _unsure_blocks(c, res, with_depth=False):   # 층·자리가 확실하지 않음 (쌓인 큐브가 책상 위로 읽혔을 수 있다)
             out.update(blocked=True, block="층이 확실하지 않음")
             out["warn"].insert(0, f"큐브 {pick_id} 의 층·자리가 확실하지 않아 막음 — 기준 종이를 같이 보이게 하거나 큐브를 폰 가까이")
         elif c["level"] > 0:
@@ -428,11 +482,13 @@ def _pick_camera(res, stale, pick_id):
             out["warn"].insert(0, f"큐브 {pick_id} 는 {c['level'] + 1}층 — 휴대폰 탭은 책상 위 큐브만 집는다 (탑 쌓기 탭)")
         return out
     f = dict(res["fused"])
-    f["id"] = PD.CUBE_ID if f.get("used") == "aruco" else None
-    c10 = next((c for c in res["cubes"] if c.get("id") == PD.CUBE_ID), None)
-    if f.get("ok") and not f.get("blocked") and c10 and (res.get("level_unsure") or c10.get("unsure") or c10["level"] > 0):
+    fid = res.get("fused_id", PD.CUBE_ID)     # 합친 큐브 번호 (0번이 없으면 보이는 큐브)
+    f["id"] = fid if f.get("used") == "aruco" else None
+    c10 = next((c for c in res["cubes"] if c.get("id") == fid), None)
+    agreed = "depth" in (f.get("sources") or []) and bool(f.get("check")) and not f.get("blocked")   # ArUco·뎁스가 허용 안으로 맞음
+    if f.get("ok") and not f.get("blocked") and c10 and (_unsure_blocks(c10, res, agreed) or c10["level"] > 0):
         f.update(blocked=True, block="쌓인 큐브" if c10["level"] > 0 and not c10.get("unsure") and not res.get("level_unsure") else "층이 확실하지 않음",
-                 warn=[f"큐브 {PD.CUBE_ID} 이 쌓여 있거나 층이 확실하지 않아 막음 (휴대폰 탭은 책상 위 큐브만)"] + list(f.get("warn") or []))
+                 warn=[f"큐브 {fid} 이 쌓여 있거나 층이 확실하지 않아 막음 (휴대폰 탭은 책상 위 큐브만)"] + list(f.get("warn") or []))
     return f
 
 

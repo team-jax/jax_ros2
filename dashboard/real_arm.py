@@ -63,6 +63,8 @@ from stm_bridge.protocol import SERVO_STDID, Frame, servo_frame   # noqa: E402
 
 LOCK_PATH = "/tmp/ak45_ctrl.lock"     # ak45_can LOCK_FILE_PATH 와 같은 파일
 SERVO_PIN_MAX = 9            # 서보 핀(STM32 채널) 번호 상한 — 펌웨어 motor_id 0..9 (stm_bridge protocol SERVO_COUNT)
+FINGER_START_TOL_DEG = 30.0   # 손가락 서보는 첫 프레임과 이만큼까지 달라도 재생 (램프로 그 각까지 간다). 2026-11-25: '서보 한 번에 보내기' 가
+                              # 손가락을 원점 0° 로 보내는데 역기구학 계획은 벌림 −15° 로 시작해 5° 검사에 늘 걸렸다
 START_TOL_DEG = 5.0           # 실물 재생: 첫 프레임과 지금 자세가 이만큼(°) 넘게 다르면 거절 (첫 프레임까지는 검사 없는 관절 직선)
 AK45_MODE_BRAKE = 2
 
@@ -197,7 +199,8 @@ class RealArm:
                              gap_s=self.p["gap_keep_s"], jump_deg=self.p["jump_deg"], max_age_s=0.5)
         self.servo_mover = Mover(self.p["max_speed"] * self.p["servo_speed_x"], self.p["ctrl_hz"])
         self.servo_sent = {}        # 서보 이름 -> (모터 °, monotonic)
-        self.servo_resend_t = 0.0
+        self.servo_resend_t = 0          # 서보 재전송을 돌아가며 보낼 다음 자리 (번호)
+        self.servo_resend_at = {}        # 서보 이름 -> 마지막으로 보낸 시각 (명령이든 재전송이든; servo_sent 의 시각은 명령만 — 화면 'N초 전 보냄')
         self.lock = threading.RLock()
         self.bus = None
         self.lock_fd = None
@@ -660,15 +663,28 @@ class RealArm:
         for n, deg in self.servo_mover.step().items():
             self._servo_send(self.joints[n], deg, now)
         rh = P["servo_resend_hz"]
-        if rh > 0 and self.servo_sent and now - self.servo_resend_t >= 1.0 / rh:
-            self.servo_resend_t = now
-            for j in self.cal.joints:
-                if j.motor == "servo" and j.name in self.servo_sent:
-                    self._send(servo_frame(j.id, self.servo_sent[j.name][0]))
+        if rh > 0 and self.servo_sent:
+            # 재전송을 한 번에 10개 몰아 보내지 않고 매 주기 몇 개씩 돌아가며 (2026-11-25: can0 송신 큐가 차 ENOBUFS 로 프레임이 빠졌다).
+            # 서보마다 1/rh 초 안에 한 번씩은 다시 가게 한 주기에 보낼 수를 정하고, 방금(1/rh 초 안) 보낸 서보는 건너뛴다
+            names = [j for j in self.cal.joints if j.motor == "servo" and j.name in self.servo_sent]
+            per = max(1, math.ceil(len(names) / max(1.0, P["ctrl_hz"] / rh)))
+            k0 = self.servo_resend_t if isinstance(self.servo_resend_t, int) else 0
+            sent = 0
+            for i in range(len(names)):
+                j = names[(k0 + i) % len(names)]
+                if now - max(self.servo_sent[j.name][1], self.servo_resend_at.get(j.name, 0.0)) < 1.0 / rh:
+                    continue
+                self._send(servo_frame(j.id, self.servo_sent[j.name][0]), retries=1)
+                self.servo_resend_at[j.name] = now
+                sent += 1
+                if sent >= per:
+                    k0 = (k0 + i + 1) % len(names)
+                    break
+            self.servo_resend_t = k0
 
     def _servo_send(self, j, deg, now):
         deg = min(max(deg, 0.0), 180.0)
-        if self._send(servo_frame(j.id, deg)):
+        if self._send(servo_frame(j.id, deg), retries=2):     # 큐가 잠깐 차면 2 ms 쉬고 다시 (서보는 피드백이 없어 빠지면 모른다)
             self.servo_sent[j.name] = (deg, now)
 
     # ------------------------------------------------------------------ 명령 (대시보드가 부름)
@@ -1117,7 +1133,7 @@ class RealArm:
                 if sent is None:
                     continue          # 한 번도 안 보낸 서보는 위(unsent)에서 이미 거절
                 cur = j.to_sim(sent[0])
-            if abs(cur - want) > tol:
+            if abs(cur - want) > (max(tol, FINGER_START_TOL_DEG) if n.startswith("finger") and n != "finger_rotation" else tol):
                 out.append(f"{n} {cur:.0f}→{want:.0f}°")
         return out
 

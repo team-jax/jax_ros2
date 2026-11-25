@@ -466,6 +466,51 @@ async def api_rl_run(req: Request):
     return JSONResponse(await asyncio.to_thread(rl_run.run, _ik_dir(), b))
 
 
+RL_TABLE_D = 0.4775   # 강화학습 정책이 학습한 책상 윗면 (어깨 축 아래 m) — 실물 책상(0.5575)이면 큐브를 약 8 cm 받침대 위에
+
+
+def _rl_live_cube(b):
+    """휴대폰 카메라 실시간 인식 (live_api, 휴대폰 탭과 같은 보정: 정류 되돌리기·중력 기울기·자리 고침) 으로 큐브 하나 → 강화학습 위치.
+    큐브 바닥 = 정책 책상 높이 RL_TABLE_D 로 보고 잰다 (그래야 정책이 맞는 높이를 집는다). 가상 모드면 가상 장면의 큐브."""
+    import live_api
+    import rl_run
+    if live_api.LIVE is None:
+        return {"ok": False, "error": "실시간 인식이 꺼져 있음"}
+    pick = b.get("pick")
+    pick = int(pick) if isinstance(pick, (int, float)) and not isinstance(pick, bool) else None
+    t0, r = time.time(), None
+    while time.time() - t0 < 5.0:     # 책상 높이를 바꾸면 다음 프레임에서 다시 계산 — 그 결과가 올 때까지
+        r = live_api.cubes(RL_TABLE_D, pick)
+        if not r.get("td_mismatch") and not r.get("stale"):
+            break
+        time.sleep(0.3)
+    p = (r or {}).get("pick") or {}
+    if not p.get("ok"):
+        return {"ok": False, "error": "카메라가 큐브를 못 찾음 — " + str(p.get("reason") or (r or {}).get("reason") or "영상 없음"), "warn": p.get("warn") or []}
+    dep = p.get("depth") or {}
+    h = dep.get("height_cm")
+    if p.get("blocked"):
+        why = p.get("block") or "막힘"
+        if h is not None and h < -4:      # 뎁스가 큐브를 정책 책상보다 한참 아래로 봄 = 받침대 없이 실물 책상 위
+            why = f"큐브가 정책 높이(어깨 아래 {RL_TABLE_D * 100:.2f} cm)보다 {abs(h):.0f} cm 아래 — 약 8 cm 받침대 위에 올려야 정책이 집는다"
+        return {"ok": False, "error": f"카메라 큐브를 못 씀: {why}", "warn": p.get("warn") or []}
+    # ArUco 만이면 뎁스 높이 검사가 없다 → 마커 크기로: 정책 책상보다 8 cm 낮은(받침대 없음) 큐브는 마커가 약 15% 작게(≈34 mm) 재진다
+    cube_row = next((x for x in (r or {}).get("cubes", []) if x.get("id") == p.get("id")), None)
+    mm = (cube_row or {}).get("marker_mm")
+    if h is None and mm is not None and mm < 36.0:
+        return {"ok": False, "error": f"큐브 마커가 {mm:.1f} mm 로 작게 재짐 (40 mm) — 큐브가 정책 높이보다 낮은 듯 (받침대 없이 실물 책상 위?). "
+                                      "약 8 cm 받침대 위에 올리고 다시", "warn": p.get("warn") or []}
+    c = p["cube"]
+    spot = rl_run.spot_from_robot(c["x"], c["y"], c["yaw_deg"])
+    return {"ok": True, "robot": {"x": c["x"], "y": c["y"], "z": -RL_TABLE_D + 0.025, "yaw_deg": c["yaw_deg"]}, "spot": spot,
+            "text": p.get("text"), "id": p.get("id"), "warn": p.get("warn") or [], "depth_height_cm": h, "marker_mm": mm, "table_d": RL_TABLE_D}
+
+
+@app.post("/api/rl/live_cube")
+async def api_rl_live_cube(req: Request):
+    return JSONResponse(await asyncio.to_thread(_rl_live_cube, await _body(req)))
+
+
 @app.post("/api/rl/vision")
 async def api_rl_vision(req: Request):
     """카메라 프로그램의 inference.json 에서 큐브 하나 → 로봇 틀 위치·RL 위치 오프셋 (ROS 없이, vision_node 의 순수 함수)."""
@@ -933,10 +978,26 @@ def _go_home(b):
         traj = pick_plan.plan_home(now, ik=os.environ.get("JAX_IK_DIR") or None, max_speed=speed, d=td)
     except Exception as e:
         return {"ok": False, "error": f"HOME 길 계획 실패: {type(e).__name__}: {e}"}
+    # 손가락 회전(finger_rotation)도 0° 로 (2026-11-25 사용자: HOME = 다 0°). plan_home 은 팔 7 + 손가락 6 만 계획한다 —
+    # 강화학습은 손가락 회전 180° 로 시작·끝나서 HOME 을 눌러도 180° 에 남았다. 팔이 HOME 에 닿은 뒤(손이 책상에서 먼 곳) 재생 속도로 0° 로 돌린다
+    rot = float(now.get("finger_rotation", 0.0))
+    has_rot = any(j["joint"] == "finger_rotation" for j in cal.get("joints") or [])
     if traj["status"] == "already":
+        if has_rot and abs(rot) > 0.5:
+            r = backend().send_joint_command(["finger_rotation"], [0.0])      # 램프로 0° (다른 관절은 이미 0)
+            return {**r, "msg": f"이미 HOME — 손가락 회전만 {rot:.0f}° → 0°"} if r.get("ok") else r
         return {"ok": True, "msg": traj["reason"]}
     if traj["status"] != "playable":
         return {"ok": False, "error": f"HOME 으로 못 감: {traj['reason']}"}
+    if has_rot and "finger_rotation" not in traj["joint_names"]:
+        r0 = math.radians(rot)
+        pos = [list(f) + [r0] for f in traj["positions"]]          # 팔이 가는 동안은 지금 회전 그대로
+        if abs(rot) > 0.5:
+            dt = float(traj.get("dt") or 0.02)
+            m = max(1, math.ceil(abs(rot) / (min(speed, 30.0) * dt)))   # 재생 속도 상한 안 → 재생 전체가 느려지지 않는다
+            last = pos[-1]
+            pos += [last[:-1] + [r0 * (1.0 - k / m)] for k in range(1, m + 1)]
+        traj = dict(traj, joint_names=list(traj["joint_names"]) + ["finger_rotation"], positions=pos)
     from arm_control.play import check_trajectory
     if kind == "direct":
         arm = direct_api.DIRECT.arm

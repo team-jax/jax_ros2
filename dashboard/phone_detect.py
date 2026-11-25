@@ -147,26 +147,27 @@ def detect(image_bytes, cfg=None):
     prm = cv2.aruco.DetectorParameters_create()
     prm.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
     real = ref_corners_real(cfg)
-    rf, found = split_markers(cv2, np, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), prm, set(real), {CUBE_ID})   # rf = 기준, found = 큐브
+    CID = int(cfg.get("cube_id", CUBE_ID))   # 집을 큐브 마커 ID (2026-11-25: 1번만 있으면 '0번 안 보임' 으로 못 집었다 — live 가 보이는 큐브로 고른다)
+    rf, found = split_markers(cv2, np, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), prm, set(real), {CID})   # rf = 기준, found = 큐브
     vis = img.copy()
     lw = max(2, w // 400)
     refs = sorted(rf)
     for i in refs:
         cv2.polylines(vis, [rf[i].astype(np.int32)], True, (60, 200, 60), lw)
         cv2.putText(vis, str(i), tuple(int(v) for v in rf[i].mean(axis=0)), cv2.FONT_HERSHEY_SIMPLEX, w / 900, (60, 200, 60), lw)
-    out.update(refs=refs, cube_seen=CUBE_ID in found, annotated=vis, size=[w, h])
-    if CUBE_ID in found:
-        cv2.polylines(vis, [found[CUBE_ID].astype(np.int32)], True, (0, 140, 255), lw)
-    if CUBE_ID not in found:
-        return {**out, "reason": f"큐브 마커(ID {CUBE_ID})가 안 보임 — 큐브 윗면이 보이게 다시" + (f" (기준 마커는 {len(refs)}개 보임)" if refs else "")}
+    out.update(refs=refs, cube_seen=CID in found, annotated=vis, size=[w, h])
+    if CID in found:
+        cv2.polylines(vis, [found[CID].astype(np.int32)], True, (0, 140, 255), lw)
+    if CID not in found:
+        return {**out, "reason": f"큐브 마커(ID {CID})가 안 보임 — 큐브 윗면이 보이게 다시" + (f" (기준 마커는 {len(refs)}개 보임)" if refs else "")}
     if not refs:   # 기준 종이 없음 → CAD 거치 자세 + 책상 높이
-        cad = _cad(cv2, np, cfg, found, w, h, (CUBE_ID,))
+        cad = _cad(cv2, np, cfg, found, w, h, (CID,))
         if cad is None:
             return {**out, "reason": "기준 종이가 안 보이고 폰 보정값·책상 높이도 없어 자리를 못 구함"}
-        cam, cpix = cad["cam"], cad["und"][CUBE_ID]
+        cam, cpix = cad["cam"], cad["und"][CID]
         top, side = _top(np, cam, cpix, cfg["cube_h"])
         out["camera"] = {"src": "cad", "pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "image_rot_deg": cad["q"] * 90}
-        return _finish_one(cv2, out, vis, lw, top, side, found[CUBE_ID])
+        return _finish_one(cv2, out, vis, lw, top, side, found[CID])
     if len(refs) < 2:
         out["warn"].append("기준 마커가 1개만 보임 — 정확도가 떨어진다 (2개 이상 나오게)")
 
@@ -177,7 +178,7 @@ def detect(image_bytes, cfg=None):
         return {**out, "reason": "기준 마커로 책상 평면을 못 구함"}
     back = cv2.perspectiveTransform(pix.reshape(-1, 1, 2), H).reshape(-1, 2)
     out["ref_rms_mm"] = round(float(np.sqrt(np.mean(np.sum((back - obj) ** 2, axis=1)))) * 1000, 2)
-    cpix = found[CUBE_ID]
+    cpix = found[CID]
     flat = cv2.perspectiveTransform(cpix.reshape(-1, 1, 2), H).reshape(-1, 2)   # 높이 보정 없는 값 (책상 평면에 쏜 것)
     cams = _cameras(cv2, np, obj, pix, w, h)
     if cams:

@@ -419,6 +419,38 @@ def run_lift_drop(C, mujoco, spot, mass, home=True):
     return summary, tr
 
 
+GRIP_FORCE_X = 3.0     # 정책 손가락 행동의 힘 목표 배율 (2026-11-25 사용자: 잡을 때 더 오므리게 — 행동 스케일). 정책이 고른 쥐는 힘
+                       # (손가락 1·2 = 0.5·(5 + 4·a7), 엄지 = 5 + 4·a9) 에 곱한다. 12 자리 시뮬: 1× = 11/12 성공 · 첫 마디 6.9/4.3°,
+                       # 3× = 11/12 · 8.5/8.9° (5× 부터 한 자리가 큐브를 놓침). IK 레포 파일은 안 고치고 grasp_lift 사본만 바꿔 끼운다
+GRIP_FORCE_RANGE = (1.0, 4.0)
+
+
+def patch_grip(C, x):
+    """chain.Chain.grasp_lift 를 '쥐는 힘 목표 × x' 사본으로 바꾼다 (원본은 C._jax_grasp_lift_orig 에 둔다). 못 바꾸면 False (원본 그대로)."""
+    orig = getattr(C, "_jax_grasp_lift_orig", None) or C.Chain.grasp_lift
+    C._jax_grasp_lift_orig = orig
+    if abs(x - 1.0) < 1e-9:
+        C.Chain.grasp_lift = orig
+        return True
+    import textwrap
+    lines = open(C.__file__, encoding="utf-8").read().split("\n")
+    try:
+        i0 = next(i for i, l in enumerate(lines) if l.startswith("    def grasp_lift("))
+        i1 = next(i for i in range(i0 + 1, len(lines)) if lines[i].startswith("    def ") or (lines[i] and not lines[i].startswith(" ")))
+    except StopIteration:
+        return False
+    src = textwrap.dedent("\n".join(lines[i0:i1]))
+    a = "want = np.array([0.5 * sf, 0.5 * sf, st]) if on.all() else np.full(3, 0.3)"
+    if src.count(a) != 1:          # IK 레포가 바뀌어 그 줄이 없으면 원본 그대로 (배율 없이)
+        return False
+    src = src.replace(a, "want = (_JAX_GRIP_X * np.array([0.5 * sf, 0.5 * sf, st])) if on.all() else np.full(3, 0.3)")
+    ns = dict(vars(C))
+    ns["_JAX_GRIP_X"] = float(x)
+    exec(compile(src, "<grasp_lift grip x%g>" % x, "exec"), ns)
+    C.Chain.grasp_lift = ns["grasp_lift"]
+    return True
+
+
 def cmd_run(C, mujoco, ik, a):
     x_cm, y_cm = float(a.get("x_cm", 0.0)), float(a.get("y_cm", 0.0))
     yaw, mass = float(a.get("yaw_deg", 0.0)), float(a.get("mass_g", 40.0)) / 1000.0
@@ -426,6 +458,12 @@ def cmd_run(C, mujoco, ik, a):
     global REAL_LIM
     REAL_LIM = {k: [float(v[0]), float(v[1])] for k, v in (a.get("limits_deg") or {}).items()}
     home = bool(a.get("home", True))
+    try:
+        gx = float(a.get("grip_force_x", GRIP_FORCE_X))
+    except (TypeError, ValueError):
+        gx = GRIP_FORCE_X
+    gx = min(max(gx, GRIP_FORCE_RANGE[0]), GRIP_FORCE_RANGE[1])
+    grip_ok = patch_grip(C, gx)
     spot = (x_cm / 100.0, y_cm / 100.0, yaw)
     if tgt:
         summary, tr = run_with_target(C, mujoco, spot, tgt, mass, home=home)
@@ -477,6 +515,7 @@ def cmd_run(C, mujoco, ik, a):
         elif isinstance(v, np.bool_):
             sm[k] = bool(v)
     sm["duration_s"] = float(tr["t"][-1])
+    sm["grip_force_x"] = gx if grip_ok else 1.0
     return {"ok": True, "dt": float(tr["t"][idx[1]] - tr["t"][idx[0]]) if len(idx) > 1 else 0.0,
             "joint_names": names, "positions": pos, "cube": cube, "cube_quat": cube_q, "phases": phases,
             "phase_idx": [int(tr["phase"][k]) for k in idx], "table": table, "target_robot": target_robot, "summary": sm, "fit_err_mm": fit_err * 1000}

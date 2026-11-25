@@ -41,8 +41,9 @@ DEFAULT_CFG = {
     "max_age_s": 3.0,                 # 이보다 오래된 inference.json 은 안 쓴다 (팔이 옛 자리로 가면 안 된다)
     "cube_dim_mm": [40.0, 80.0],      # dims_mm[0], dims_mm[1] 둘 다 이 안 (5 cm 큐브가 60~68 로 재졌다)
     "depth_range_m": [0.3, 1.0],
-    "cube_labels": list(DEFAULT_LABELS),
-    "work_x_m": None, "work_y_m": None, "work_z_m": None,   # [min, max] 로봇 좌표, 밖의 후보는 버림
+    "cube_labels": ["*"],             # 이름 상관없이 크기·높이로 (2026-11-25: YOLO 가 큐브를 'cell phone' 이라 불러 뎁스가 큐브를 버렸다 — 예전 blob·kite 만)
+    "work_x_m": [-0.40, 0.40], "work_y_m": [-0.70, -0.10], "work_z_m": None,   # [min, max] 로봇 좌표, 밖의 후보는 버림 (2026-11-25: 책상 밖
+                                      # x 0.66 y −0.93 의 사람·손을 큐브로 집으려 했다 → 팔이 닿는 쪽 책상만. 비우면 끔)
     "yaw_manual_deg": None,           # 숫자면 추정 대신 이 각을 쓴다
     "pos_fix_m": [-0.02, 0.04],       # 카메라로 찾은 큐브 자리 고침 [x, y] m (거치 자리 tx·ty 에 더함 = ArUco·뎁스 둘 다). 2026-11-25 사용자:
                                       # 카메라로 집으면 약 3 cm 앞(−y)으로 감 → y +0.03, 그 뒤 '왼쪽으로 2 cm, 앞으로 1 cm 더' → x −0.02 (+x = 로봇 왼쪽),

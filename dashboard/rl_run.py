@@ -73,6 +73,8 @@ def run(ik_dir, body):
         arg = {"x_cm": _num(b, "x_cm", 0.0), "y_cm": _num(b, "y_cm", 0.0),
                "yaw_deg": _num(b, "yaw_deg", 0.0), "mass_g": _num(b, "mass_g", 40.0),
                "home": b.get("home") is True}   # 기본 = 들고 ㄴ자 복귀(쥔 채) — 화면 기본과 같게 (2026-11-25)
+        if b.get("grip_force_x") is not None:           # 정책 쥐는 힘 배율 (rl_worker.GRIP_FORCE_X, 기본 3)
+            arg["grip_force_x"] = _num(b, "grip_force_x", 3.0)
         tx, ty = b.get("target_x_cm"), b.get("target_y_cm")     # 놓을 자리 (선택): 둘 다 있거나 둘 다 없어야 한다
         if (tx is None) != (ty is None):
             raise ValueError("놓을 자리는 target_x_cm 과 target_y_cm 를 같이 줘야 함")

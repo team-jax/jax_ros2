@@ -25,6 +25,11 @@
       <div class="row" id="rl-presets" style="display:none"><button class="btn line small" id="rl-clear-target">놓을 자리 지우기</button></div>
       <div class="note" id="rl-target-note"></div>
       <div class="note" id="rl-spot-note"></div>
+      <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap">
+        <button class="btn" id="rl-live-run" title="휴대폰 카메라 실시간 인식(휴대폰 탭과 같은 보정)으로 큐브 자리를 가져와 바로 시뮬을 돌린다 — 실물 재생은 ③ 에서 따로">📷 카메라 큐브로 강화학습 돌리기</button>
+        <button class="btn line" id="rl-live-get">카메라 큐브 자리만 가져오기</button>
+      </div>
+      <div class="note" id="rl-live-note">정책은 책상이 어깨 아래 47.75 cm 인 장면에서 배웠다 — 실물 책상(약 55.75 cm)이면 큐브를 <b>약 8 cm 받침대</b> 위에 올리고, 카메라도 그 높이로 잰다.</div>
     </div>
 
     <div class="card" id="rl-camcard">
@@ -417,7 +422,8 @@
       const rows = [["위치 (x, y)", s.spot_cm ? `${s.spot_cm[0]}, ${s.spot_cm[1]} cm` : "-"], ["큐브 각도", s.cube_yaw_deg + "°"],
                     ["학습 범위", s.valid_spot ? "안" : "밖"], ["손 각도 θ (조회표)", Number.isFinite(s.theta_deg) ? s.theta_deg.toFixed(1) + "°" : "-"],
                     ["들어 올린 높이", Number.isFinite(s.max_rise_m) ? (s.max_rise_m * 100).toFixed(1) + " cm" : "-"],
-                    ["큐브 무게", s.cube_mass_kg ? Math.round(s.cube_mass_kg * 1000) + " g" : "-"]];
+                    ["큐브 무게", s.cube_mass_kg ? Math.round(s.cube_mass_kg * 1000) + " g" : "-"],
+                    ["쥐는 힘 배율 (정책 행동)", Number.isFinite(s.grip_force_x) ? s.grip_force_x + "×" : "-"]];
       if (pl && pl.target_cm && !pl.put_back) rows.push(["놓을 자리", `${pl.target_cm[0]}, ${pl.target_cm[1]} cm`], ["놓은 자리 오차", Number.isFinite(pl.xy_err_cm) ? pl.xy_err_cm + " cm" : "-"],
         ["놓은 큐브 기울기", Number.isFinite(pl.tilt_deg) ? pl.tilt_deg + "°" : "-"]);
       if (dr) rows.push(["놓은 큐브", dr.dropped ? `책상 위 · 처음 자리에서 ${dr.moved_cm} cm · 기울기 ${dr.tilt_deg}°` : "안 떨어짐 (손에 걸림)"]);
@@ -538,6 +544,27 @@
       note.textContent = `큐브 읽음 (로봇 틀 x ${(r.robot.x * 100).toFixed(1)}, y ${(r.robot.y * 100).toFixed(1)}, z ${(r.robot.z * 100).toFixed(1)} cm, yaw ${r.robot.yaw_deg}°) → 위치 (${r.spot.x_cm}, ${r.spot.y_cm}) cm, 각도 ${r.spot.yaw_deg}°. ` +
         (r.warn ? r.warn + ". " : "") + r.yaw_note;
     }
+    // 휴대폰 카메라 실시간 인식 → 큐브 자리 (POST /api/rl/live_cube: 큐브 바닥 = 정책 책상 높이로 잼). run = 가져와서 바로 시뮬
+    async function liveCube(run) {
+      const note = $("live-note");
+      note.className = "note"; note.textContent = "카메라에서 큐브 읽는 중… (몇 초)";
+      let r;
+      try { r = await api("/api/rl/live_cube", {}); } catch (e) { note.className = "note bad"; note.textContent = "서버 요청 실패: " + e.message; return; }
+      if (!r.ok) { note.className = "note bad"; note.textContent = r.error + ((r.warn || []).length ? " · " + r.warn.join(" · ") : ""); return; }
+      $("in-x").value = r.spot.x_cm; $("in-y").value = r.spot.y_cm; $("in-yaw").value = r.spot.yaw_deg;
+      if ($("yaw-range")) $("yaw-range").value = r.spot.yaw_deg;
+      state.vision = { x: r.robot.x, y: r.robot.y, yaw: r.robot.yaw_deg };
+      if (state.viewer && state.viewer.setObject) state.viewer.setObject({ x: r.robot.x, y: r.robot.y, z: r.robot.z, yaw: r.robot.yaw_deg });
+      updateNote();
+      const valid = isValidSpot(r.spot.x_cm, r.spot.y_cm);
+      note.className = "note" + (valid === false || (r.warn || []).length ? " warn" : "");
+      note.textContent = `카메라 큐브${r.id != null ? " " + r.id + "번" : ""}: 로봇 틀 x ${(r.robot.x * 100).toFixed(1)}, y ${(r.robot.y * 100).toFixed(1)} cm, yaw ${r.robot.yaw_deg.toFixed(0)}° → 위치 (${r.spot.x_cm}, ${r.spot.y_cm}) cm, 각도 ${r.spot.yaw_deg}° · ${r.text || ""}` +
+        (valid === false ? " · ⚠ 정책이 학습한 범위(파란 칸) 밖 — 큐브를 파란 칸 쪽으로" : "") + ((r.warn || []).length ? " · " + r.warn.join(" · ") : "");
+      if (run) {
+        if (valid === false) { toast("학습 범위 밖이라 돌리지 않음 — 큐브를 파란 칸 쪽으로 옮겨 주세요", true); return; }
+        await run();
+      }
+    }
     function initCamera() {
       let saved = null;
       try { saved = JSON.parse(lsGet(CAM_KEY) || "null"); } catch (e) { saved = null; }
@@ -547,6 +574,8 @@
       for (const id of ["in-x", "in-y"]) $(id).addEventListener("input", camUpdate);
       $("cam-example").addEventListener("click", () => { CAM_IDS.forEach((id, i) => { $(id).value = CAM_EXAMPLE[i]; }); $("cam-on").checked = true; camUpdate(); });
       $("cam-read").addEventListener("click", readCamera);
+      $("live-get").addEventListener("click", () => liveCube(false));
+      $("live-run").addEventListener("click", () => liveCube(true));
       camUpdate();
     }
 

@@ -12,6 +12,8 @@ server.py 는 연결 지점만 가진다 (backend() 가 DIRECT.backend() 를 부
 """
 import asyncio
 import json
+import math
+import os
 import sys
 import threading
 
@@ -117,6 +119,41 @@ def drop_unverified(problems):
     return [p for p in problems if not str(p).startswith("calibration not verified")]
 
 
+IK_GRIP_ADD_DEG = float(os.environ.get("JAX_IK_GRIP_ADD_DEG", "15"))   # 역기구학·휴대폰 탭 실물 재생: 쥐는 동안 손가락 첫 마디를 이만큼 더 닫는다
+# (2026-11-25 사용자 '손가락을 좀 더 오므리면': 계획은 시뮬에서 큐브에 닿는 −10.9° 까지만 닫아 실물 서보가 거의 안 누른다 — 강화학습 탭의 더 쥐기와 같은 이유)
+
+
+def squeeze_ik(traj, add_deg=IK_GRIP_ADD_DEG):
+    """실물용 사본: 손가락 첫 마디(joint1 3개)를 닫는 구간(grasp→close)에 0→add_deg 로 더 닫고, 들고 옮기는 동안 그대로, 놓는 구간(place→open)에
+    다시 0 으로. 계획의 손가락 속도(이 구간 0.35°/프레임)에 0.1°/프레임 정도 더해질 뿐이라 재생이 느려지지 않는다. marks 가 없으면 그대로."""
+    mk = traj.get("marks") or {}
+    if add_deg <= 0 or not all(k in mk for k in ("grasp", "close", "place", "open")):
+        return traj
+    names = traj["joint_names"]
+    idx = [i for i, n in enumerate(names) if n in ("finger1_joint1", "finger2_joint1", "finger3_joint1")]
+    g, c, pl, o = (int(mk[k]) for k in ("grasp", "close", "place", "open"))
+    if not idx or not g < c <= pl < o:
+        return traj
+    add = math.radians(add_deg)
+    def w(k):
+        if k <= g or k >= o:
+            return 0.0
+        if k < c:
+            return (k - g) / (c - g)
+        if k <= pl:
+            return 1.0
+        return 1.0 - (k - pl) / (o - pl)
+    pos = []
+    for k, f in enumerate(traj["positions"]):
+        f = list(f)
+        wk = w(k)
+        if wk:
+            for i in idx:
+                f[i] += add * wk
+        pos.append(f)
+    return {**traj, "positions": pos, "grip_add_deg": add_deg}
+
+
 def play_real(trajectory, b):
     if not DIRECT.connected():
         return {"ok": False, "error": "팔 연결 안 됨 (직접 CAN)"}
@@ -133,7 +170,7 @@ def play_real(trajectory, b):
             same = False
         if not same:
             return {"ok": False, "error": "계획이 바뀜 — 화면의 계획을 확인하고 다시 재생"}
-    traj = t["traj"]
+    traj = squeeze_ik(t["traj"])      # 실물만 더 쥐기 (계획 파일·3D 는 그대로)
     from arm_control.play import check_trajectory
     fatal = analytic_fatal(traj)
     if fatal:
