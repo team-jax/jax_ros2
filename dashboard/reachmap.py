@@ -119,7 +119,13 @@ def check(ik_dir, body):
             raise ValueError
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "error": "cube: [x, y, yaw], target: [x, y] 숫자"}
-    r = rc.plan(tuple(cube), tuple(target), d)
+    if not hasattr(rc, "grasps_for"):   # reachmap() 와 같은 가드: IK 레포가 옛 버전이면 서버가 500 으로 죽지 말고 이유를 화면에
+        return {"ok": False, "error": "realcoords.py 가 옛 버전 (grasps_for 없음) — team-jax/IK handroll-limit 최신으로. "
+                "지도 판정은 '옛 맵' 을 끄면 실제 IK(/api/ik/pair)로 한다"}
+    try:
+        r = rc.plan(tuple(cube), tuple(target), d)
+    except Exception as e:
+        return {"ok": False, "error": f"realcoords.plan 실패: {type(e).__name__}: {e}"}
     out = {k: ([round(float(x), 4) for x in v] if hasattr(v, "tolist") else v) for k, v in r.items()}
     yaw_sim = out.get("yaw", rc.fold_yaw(cube[2] + rc.SIM_FROM_REAL_YAW))
     one = {}

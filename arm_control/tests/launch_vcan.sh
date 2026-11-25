@@ -53,11 +53,13 @@ ak45="$(grep -ao '00000404#[0-9A-F]*' "$out/dump.txt" | tail -1)"
 servo="$(grep -ao '005#[0-9A-F]*' "$out/dump.txt" | tail -1)"
 echo "   last AK45 id 4 frame: $ak45   servo frames: $(grep -ac '005#' "$out/dump.txt")   last: $servo"
 check "AK45 id 4 ends at -10 deg: mode 4, int32 -100000 = FFFE7960" "$([ "$ak45" = "00000404#FFFE7960" ] && echo 1 || echo 0)"
-check "servo 9 (W_PITCH) at 90 + 20 deg: 005#09044C" "$([ "$servo" = "005#09044C" ] && echo 1 || echo 0)"
+# wrist_pitch(sim 20°) 서보 프레임·state 값은 calibration.json 에서 (핀·영점을 사용자가 실물에서 바꾼다)
+read -r wp_frame wp_name wp_rad < <(python3 -c 'from math import radians; from arm_control import calibration as C; j = C.load()["wrist_pitch"]; x = min(max(round(j.to_motor(20.0)[0] * 10), 0), 1800); print("005#%02X%04X" % (j.id, x), j.name, "%.6f" % (int(radians(j.to_motor(20.0)[0]) * 1e6) / 1e6))')
+check "servo $wp_name at zero_deg + 20 deg: $wp_frame" "$([ "$servo" = "$wp_frame" ] && echo 1 || echo 0)"
 check "the other AK45s were not commanded" \
     "$(grep -aE '0000040[123]#' "$out/dump.txt" | grep -q . && echo 0 || echo 1)"
 wait "$echostate" 2>/dev/null
-check "/servo/state holds 110 deg = 1.919862 rad" "$(grep -q '1.919862' "$out/state.txt" && echo 1 || echo 0)"
+check "/servo/state holds $wp_rad rad (zero_deg + 20 deg)" "$(grep -q "$wp_rad" "$out/state.txt" && echo 1 || echo 0)"
 
 echo "== Ctrl+C (SIGINT) on the launch"
 : > "$out/dump.txt"

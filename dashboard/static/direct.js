@@ -245,8 +245,16 @@ renderTraj = function () {
   o.go.disabled = !T.traj || !DC() || pb.running || stale;
   o.go.title = !DC() ? "연결 탭 ② 팔 연결 먼저" : !T.traj ? "계획(궤적) 먼저" : stale ? "값이 바뀜 — 계획 다시" : "";
   o.stop.disabled = !pb.running;
-  o.info.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` + (pb.phase ? " — " + phaseText(pb) : "") : pb.reason ? `마지막: ${pb.reason}` : "";
+  o.info.textContent = pb.running && pb.holding ? `첫 자세 유지 중 — ${pb.hold}초 뒤에 움직이기 시작 (전체 약 ${pb.seconds.toFixed(0)}초)` : pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` + (pb.phase ? " — " + phaseText(pb) : "") : pb.reason ? endText(pb) : "";
+  const bad = !pb.running && pb.reason && pb.reason !== "끝까지 재생";
+  o.info.style.color = bad ? "var(--red-d)" : ""; o.info.style.fontWeight = bad ? "700" : "";   // 중간에 멈추면 빨갛고 굵게 (작은 글씨로 놓치지 않게)
 };
+// 재생이 끝난 이유: 어디(프레임·초)에서, 왜. 실물에서만 생기는 중단(막힘·온도·에러·피드백 끊김·추종 15° 초과)이 여기에 나온다.
+function endText(pb) {
+  if (pb.reason === "끝까지 재생") return "끝까지 재생함";
+  const at = Number.isFinite(pb.frame) && pb.frames ? `${pb.frame}/${pb.frames - 1} 프레임 (약 ${(pb.frame * (pb.period || 0)).toFixed(0)}초)` : "";
+  return pb.reason === "stopped" ? `멈춤 버튼으로 멈춤 — ${at}` : `⚠ ${at}에서 멈춤: ${pb.reason} (연결 탭 로그에도 남음)`;
+}
 async function playReal() {
   const mtime = T.info && T.info.mtime;     // 지금 화면이 보여 주는 계획. 확인창 사이에 계획이 바뀌면 서버가 거절
   if (!confirm("⚠ 실물 팔로 이 궤적을 재생한다.\n\n원점 4개가 잡혀 있어야 하고, 첫 프레임까지 천천히 간 뒤 재생한다. " +
@@ -254,6 +262,10 @@ async function playReal() {
   if (!confirm("정말 실물로 재생할까요? (멈춤 = ■ STOP / Esc)")) return;
   T.view = "actual";
   let r = await post("/api/ik/play_real", { force: false, mtime }, true);
+  if (!r.ok && /첫 프레임에서/.test(r.error || "")) {   // 지금 자세가 계획 시작(HOME)과 다름 — 예: 손 위치로 보낸 자세 그대로. HOME 으로 먼저 가는 길을 바로 묻는다
+    if (confirm("지금 자세가 계획의 시작 자세(HOME)와 달라서 재생이 거절됐다.\n\n" + r.error + "\n\nHOME 으로 먼저 갈까요? (도착한 뒤 '실물로 재생'을 다시 누른다)")) goHome();
+    return;
+  }
   if (!r.ok && r.need_force) {
     if (!confirm("검사에서 문제가 나왔다 (play_trajectory 면 --force 가 필요):\n\n- " + r.problems.join("\n- ") + "\n\n그래도 재생할까요?")) return;
     r = await post("/api/ik/play_real", { force: true, mtime });

@@ -41,6 +41,8 @@ def clipped_joints(traj, cal):
     out = []
     for k, name in enumerate(traj["joint_names"]):
         j = cal[name]
+        if getattr(j, "clip_ok", False):     # holds the end of its range on purpose (calibration.Joint.clip_ok)
+            continue
         sim = [degrees(f[k]) for f in traj["positions"]]
         # 0.05 deg of slack: a joint the sim holds on its stop reads a hair past it in floats
         if any(abs(j.to_motor(v)[0] - (j.zero_deg + j.sign * j.scale * v)) > 0.05 for v in sim):

@@ -94,7 +94,9 @@ e2=$!
 timeout 25 ros2 topic echo --once /servo/state > "$out/servostate.txt" 2>&1 &
 e3=$!
 sleep 2
-# elbow -10 deg (AK45 4), wrist_pitch 20 deg -> servo motor 90 + 20 = 110 deg
+# elbow -10 deg (AK45 4), wrist_pitch 20 deg -> servo motor zero_deg + 20 deg. 이름·각도는 calibration.json 에서 읽는다
+# (사용자가 실물에서 핀·영점을 고치므로 'W_PITCH' · 110 deg 같은 숫자를 박아 두면 매번 낡는다)
+read -r wp_name wp_rad < <(python3 -c 'from math import radians; from arm_control import calibration as C; j = C.load()["wrist_pitch"]; print(j.name, "%.6f" % radians(j.to_motor(20.0)[0]))')
 timeout 20 ros2 topic pub -1 --wait-matching-subscriptions 1 /arm_control/joint_command sensor_msgs/msg/JointState \
     "{name: [elbow, wrist_pitch], position: [-0.17453292519943295, 0.3490658503988659]}" > /dev/null 2>&1
 wait $e1 $e2 $e3 2>/dev/null
@@ -109,10 +111,10 @@ PY
 echo "   /ak45/command: $(nm "$out/ak45cmd.txt")   /servo/command: $(nm "$out/servocmd.txt")   /servo/state: $(nm "$out/servostate.txt")"
 check "/ak45/command: name ak45_4, motor angle in rad (first step of the ramp, -6 deg = -0.104720)" \
     "$([ "$(nm "$out/ak45cmd.txt")" = "['ak45_4'] [-0.10472]" ] && echo 1 || echo 0)"
-check "/servo/command: name W_PITCH, MOTOR angle in rad (110 deg = 1.919862, not the sim 20 deg)" \
-    "$([ "$(nm "$out/servocmd.txt")" = "['W_PITCH'] [1.919862]" ] && echo 1 || echo 0)"
-check "/servo/state: W_PITCH = the angle last sent (1.919862 rad)" \
-    "$([ "$(nm "$out/servostate.txt")" = "['W_PITCH'] [1.919862]" ] && echo 1 || echo 0)"
+check "/servo/command: name $wp_name, MOTOR angle in rad ($wp_rad = zero_deg + 20 deg, not the sim 20 deg)" \
+    "$([ "$(nm "$out/servocmd.txt")" = "['$wp_name'] [$wp_rad]" ] && echo 1 || echo 0)"
+check "/servo/state: $wp_name = the angle last sent ($wp_rad rad)" \
+    "$([ "$(nm "$out/servostate.txt")" = "['$wp_name'] [$wp_rad]" ] && echo 1 || echo 0)"
 
 kill -INT "$launchpid" "$visionpid" 2>/dev/null
 for _ in $(seq 1 20); do kill -0 "$launchpid" 2>/dev/null || break; sleep 0.5; done

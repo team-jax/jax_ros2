@@ -61,6 +61,8 @@ def camera(tmp):
         os.replace(tmpf, run / name)
 
     put("inference.png", panel)
+    L.LIVE_MAX_LEVELS = 5   # 이 장면은 쌓인 큐브(탑 쌓기 시절) — 층 판정 코드를 계속 시험한다 (실제 서버는 1: 탑 쌓기 없앰)
+    L.LIVE.td = 0.4775      # 이 장면은 책상 0.4775 로 그렸다 (서버 기본은 2026-11-25 부터 실물 0.5575)
     ok = wait(lambda: L.LIVE.res is not None and L.LIVE.res.get("src") == "inference.png", 8)
     r = L.cubes(0.4775, None)
     got = {c["id"]: c for c in r["cubes"]}

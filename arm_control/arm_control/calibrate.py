@@ -34,6 +34,7 @@ from stm_bridge.protocol import servo_frame
 
 HZ = 50
 SERVO_WAIT_S = 5.0     # how long a servo command waits for stm_bridge to be seen on /servo/command
+AK45_WAIT_S = 3.0      # how long an AK45 command waits for the first /joint_states (ROS discovery right after start)
 
 
 class DryOutput:
@@ -113,9 +114,17 @@ class Session:
             self.out(f"  {target:g} is outside {j.name}'s bounds {lo:g}..{hi:g}; not moving")
             return
         start = self.current(j)
+        if start is None and j.motor == "ak45" and self.output.live:
+            # a command typed (or piped) right after start can come before discovery has matched ak45_node:
+            # wait a little for the first feedback, like a servo command waits for stm_bridge (wait_for_stm_bridge)
+            for _ in range(int(AK45_WAIT_S / 0.05)):
+                self.sleep(0.05)
+                start = self.current(j)
+                if start is not None:
+                    break
         if start is None:
             if j.motor == "ak45" and self.output.live:
-                self.out(f"  no /joint_states for ak45_{j.id}; is ak45_node running? not moving")
+                self.out(f"  no /joint_states for ak45_{j.id} after {AK45_WAIT_S:g} s; is ak45_node running? not moving")
                 return
             path = [target]
         else:

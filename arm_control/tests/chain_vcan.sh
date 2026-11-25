@@ -42,7 +42,8 @@ for f in frames:
     last[int(data[:2], 16)] = int(data[2:6], 16)
 want = {}
 import re
-ids = {"W_PITCH": 9, "W_YAW": 8, "W_X": 7, "F1_1": 0, "F1_2": 1, "F2_1": 2}
+from arm_control import calibration as _C   # 핀·이름은 사용자가 실물에서 바꾼다 → 표를 박아 두지 않고 calibration.json 에서
+ids = {j.name: j.id for j in _C.load().joints if j.motor == "servo"}
 for name, x10 in load["final_x10"].items():
     want[ids[name]] = x10
 print("PASS" if last == want else "FAIL", " last frame of every servo is its goal:", last, "want", want)

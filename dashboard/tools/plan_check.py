@@ -61,7 +61,7 @@ def main():
     out = []
     for _ in range(a.n):
         c = random.choice(green); t = random.choice(green); yaw = random.choice(yaws)
-        ns = argparse.Namespace(cube=[c[0], c[1], yaw], target=list(t), target_yaw=None, d=d, ik=None, calibration=None, max_speed=30.0, grasp=grasp)
+        ns = argparse.Namespace(cube=[c[0], c[1], yaw], target=list(t), target_yaw=None, d=d, ik=None, calibration=None, max_speed=30.0, grasp=grasp, pick_drop=0.0)   # 지도(낮춤 없음)와 같은 조건
         t0 = time.time()
         try:
             r = pick_plan.plan(ns)

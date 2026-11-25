@@ -819,6 +819,8 @@ def install(app, log_dir, get_arm, get_mode, get_can):
             b = await req.json()
         except Exception:
             b = {}
+        if not isinstance(b, dict):              # [] · null · "str" → 기본 (전엔 b.get 에서 500)
+            b = {}
         kind = str(b.get("kind") or "manual")
         if kind not in ("manual", "ik", "home", "stack", "rl"):
             kind = "manual"

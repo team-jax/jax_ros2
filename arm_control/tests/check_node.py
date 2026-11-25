@@ -18,6 +18,17 @@ from sensor_msgs.msg import JointState
 from arm_control.arm_control_node import ArmControlNode
 from stm_bridge.stm_bridge_node import StmBridgeNode
 
+from arm_control import calibration as _C
+
+# 기대값은 calibration.json 에서 계산한다 (사용자가 실물에서 영점·핀·범위를 고치므로 숫자를 박아 두면 매번 낡는다)
+_CAL = _C.load()
+
+
+def _servo_hex(j, sim_deg):
+    """sim 각 -> 그 서보가 받는 CAN 프레임 'ID#...' (stm_bridge.protocol.servo_frame 와 같은 x10 부호화)."""
+    x10 = min(max(round(j.to_motor(sim_deg)[0] * 10), 0), 1800)
+    return f"005#{j.id:02X}{x10 >> 8:02X}{x10 & 0xFF:02X}"
+
 failures = []
 
 
@@ -83,10 +94,10 @@ def main():
     check("elbow starts from its feedback (2 deg) and steps 6 deg at 300 deg/s, 50 Hz",
           [round(v, 4) for v in elbow[:2]], [round(radians(-4.0), 4), round(radians(-10.0), 4)])
     check("elbow ends at -10 deg in rad", round(elbow[-1], 6), round(radians(-10.0), 6))
-    check("/servo/command uses servo names", sorted({n for m in servo_cmds for n in m.name}), ["W_PITCH"])
-    check("/servo/command is the servo MOTOR angle in rad (90 + 20 deg)",
-          [round(p, 9) for m in servo_cmds for p in m.position], [round(radians(110.0), 9)])
-    check("servo: first frame jumps to 90 + 20 deg", frames[:1], ["005#09044C"])
+    check("/servo/command uses servo names", sorted({n for m in servo_cmds for n in m.name}), [_CAL["wrist_pitch"].name])
+    check("/servo/command is the servo MOTOR angle in rad (zero_deg + 20 deg)",
+          [round(p, 9) for m in servo_cmds for p in m.position], [round(radians(_CAL["wrist_pitch"].to_motor(20.0)[0]), 9)])
+    check("servo: first frame jumps to zero_deg + 20 deg", frames[:1], [_servo_hex(_CAL["wrist_pitch"], 20.0)])
     check("servo: no more frames once there", len(frames), 1)
 
     send(["elbow"], [30.0])
@@ -94,7 +105,7 @@ def main():
     check("elbow 30 deg passes (limit covers the sim range)", round(got[-1].position[0], 6), round(radians(30.0), 6))
     send(["elbow"], [120.0])
     run(1.0)
-    check("elbow 120 deg is clipped to the sim range, 105", round(got[-1].position[0], 6), round(radians(105.0), 6))
+    check("elbow 120 deg is clipped to the sim range", round(got[-1].position[0], 6), round(radians(_CAL["elbow"].sim_range_deg[1]), 6))
 
     # play_trajectory's frames go through arm_control_node to the motors
     from arm_control.play import play
@@ -114,7 +125,7 @@ def main():
     t.join()
     check("play: all frames published", len(sent), 3 + 1)
     check("play: elbow ends at -13 deg", round(got[-1].position[0], 6), round(radians(-13.0), 6))
-    check("play: wrist_pitch servo ends at 90 + 12 deg", frames[-1], "005#0903FC")
+    check("play: wrist_pitch servo ends at zero_deg + 12 deg", frames[-1], _servo_hex(_CAL["wrist_pitch"], 12.0))
 
     node.destroy_node()
     bridge.destroy_node()

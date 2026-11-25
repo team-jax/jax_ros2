@@ -22,8 +22,20 @@ DEFAULT_C2R = [0.174, -0.1177, -0.012, 135.129, 0.988, 0.992]   # camera.yaml: [
 # (프로파일 중심선 앞 117.7 mm, 어깨 피치축 − 7 mm = roll 축 − 12 mm), 회전은 CAMERA.md 의 '앞을 보고 45° 아래' × 광축 둘레 180°
 # (폰이 뒤집혀 끼워짐) 에서 1.4° 다르다 (IMU 로 잰 값이라). 책상 높이 재기는 phone_table 의 CAD 값을 쓴다.
 DEFAULT_LABELS = ("blob", "kite")     # blob = 책상 평면 위로 튀어나온 덩어리 (lib_blobs), kite = COCO(YOLO)가 큐브를 부른 이름
+def default_repo_dir():
+    """폰 스테레오 저장소 기본 위치: JAX_DEPTH_REPO, 아니면 흔한 자리 중 z_phone_stereo.py 가 있는 첫 곳 (철자 Stero/Stereo 둘 다),
+    아무 데도 없으면 팀 README 의 ~/Documents/SteroDepthSeg."""
+    if os.environ.get("JAX_DEPTH_REPO"):
+        return os.environ["JAX_DEPTH_REPO"]
+    cands = [os.path.expanduser(f"~/{d}/{n}") for d in ("Documents", "Desktop", "") for n in ("SteroDepthSeg", "StereoDepthSeg")]
+    for c in cands:
+        if os.path.isfile(os.path.join(c, "z_phone_stereo.py")):
+            return c
+    return cands[0]
+
+
 DEFAULT_CFG = {
-    "repo_dir": os.environ.get("JAX_DEPTH_REPO") or os.path.expanduser("~/Documents/SteroDepthSeg"),
+    "repo_dir": default_repo_dir(),
     "run_dir": "",                    # 빈 값 = <repo_dir>/phone_stereo/runs/dash
     "camera_to_robot": list(DEFAULT_C2R),
     "max_age_s": 3.0,                 # 이보다 오래된 inference.json 은 안 쓴다 (팔이 옛 자리로 가면 안 된다)
@@ -32,6 +44,12 @@ DEFAULT_CFG = {
     "cube_labels": list(DEFAULT_LABELS),
     "work_x_m": None, "work_y_m": None, "work_z_m": None,   # [min, max] 로봇 좌표, 밖의 후보는 버림
     "yaw_manual_deg": None,           # 숫자면 추정 대신 이 각을 쓴다
+    "pos_fix_m": [-0.02, 0.04],       # 카메라로 찾은 큐브 자리 고침 [x, y] m (거치 자리 tx·ty 에 더함 = ArUco·뎁스 둘 다). 2026-11-25 사용자:
+                                      # 카메라로 집으면 약 3 cm 앞(−y)으로 감 → y +0.03, 그 뒤 '왼쪽으로 2 cm, 앞으로 1 cm 더' → x −0.02 (+x = 로봇 왼쪽),
+                                      # y +0.04. 중력·마커로는 못 재는 자리·yaw 오차 (마지막 카메라 보정)
+    "wifi_host": "",                  # 2026-11-25 사용자 (USB 불안정): "" = USB(adb) · "auto" = 핫스팟 (PC 기본 게이트웨이 = 폰) · IP = Tailscale 등
+    "send_fps": 1.0,                  # Wi-Fi 일 때 폰이 1 초에 보내는 쌍 수 (USB 는 전부)
+    "text_rot180": True,              # 결과 그림 글자를 180° 돌려 쓰게 (--text-rot180): 대시보드가 그림을 뒤집어 보여 줄 때 바로 읽힘
     "save_rgbd": False,               # 폰 프로그램을 --rgbd-viewer 로 켠다 → rgbd/rgbd.npz (5초마다) — 책상 높이 재기(phone_table)가 읽는다
 }
 CUBE_SIDE = 0.05
@@ -117,7 +135,7 @@ def camera_to_robot(p_cam, params):
 
 
 def select_cube(raw, cube_dim_mm, depth_range_m, cube_labels=DEFAULT_LABELS, c2r=None, work=(None, None, None),
-                weights=(1.0, 1.0), min_margin=0.05, prev=None, track_tol_m=0.03):
+                weights=(1.0, 1.0), min_margin=0.05, prev=None, track_tol_m=0.03, prefer=None, prefer_tol_m=0.10):
     """inference.json 내용 raw 에서 큐브 하나를 고른다 → (dict, None) 또는 (None, 이유). vision_node 의 select_cube 와 같은 규칙:
     후보 = 이름·status ok·크기·거리·center·yaw 가 맞고 (c2r 이 있으면) 작업 구역 안. 직전에 고른 자리(prev) 3 cm 안의 후보가 있으면 그것.
     아니면 점수 1등 — 2등과 min_margin 이상 차이 날 때만 (아니면 '헷갈림'). dict 에는 원래 객체(obj)도 넣는다."""
@@ -155,6 +173,13 @@ def select_cube(raw, cube_dim_mm, depth_range_m, cube_labels=DEFAULT_LABELS, c2r
             best = min(near, key=lambda t: t[0])[1]
             best["tracked"] = True
             return best, None
+    if prefer is not None and len(cands) > 1:
+        # 큐브가 여럿이면 ArUco 가 본 그 큐브 (x, y) 에 가장 가까운 후보 (2026-11-25: 큐브 2개면 점수가 비슷해 '헷갈림' 으로 뎁스를 버렸다).
+        # ArUco 자리는 책상 높이 d 가 틀리면 몇 cm 어긋나므로 넉넉히 prefer_tol_m 안 — 그 차이는 phone_fuse 가 'ArUco·뎁스 차' 로 따로 본다
+        near = sorted((hypot(c["pos"][0] - prefer[0], c["pos"][1] - prefer[1]), i, c) for i, c in enumerate(cands))
+        if near[0][0] <= prefer_tol_m and (len(near) == 1 or near[1][0] - near[0][0] >= 0.03):
+            near[0][2]["matched_aruco_m"] = round(near[0][0], 3)
+            return near[0][2], None
     cands.sort(key=lambda c: -c["score"])
     if len(cands) > 1 and cands[0]["score"] - cands[1]["score"] < min_margin:
         a, b = cands[0], cands[1]
@@ -255,7 +280,9 @@ def clean_cfg(d):
         if k in d:
             if not isinstance(d[k], str) or len(d[k]) > 500 or "\0" in d[k]:
                 raise ValueError(f"{k}: 폴더 경로 글자")
-            out[k] = d[k].strip()
+            out[k] = os.path.expanduser(d[k].strip())      # '~/…' 그대로면 cwd·exists 가 못 찾는다
+    if out.get("repo_dir") == "":
+        out["repo_dir"] = default_repo_dir()               # 비우면 자동으로 찾은 곳
     if "camera_to_robot" in d:
         v = numbers(d["camera_to_robot"], 6)
         if v is None or max(abs(a) for a in v[:3]) > 3 or max(abs(a) for a in v[3:]) > 360:
@@ -283,6 +310,25 @@ def clean_cfg(d):
             if d[k] not in (None, []) and (v is None or v[0] > v[1]):
                 raise ValueError(f"{k}: 비우거나 [min, max]")
             out[k] = list(v) if v else None
+    if "pos_fix_m" in d:
+        v = numbers(d["pos_fix_m"], 2)
+        if v is None or max(abs(a) for a in v) > 0.10:
+            raise ValueError("pos_fix_m: [x, y] m, 각각 ±0.10 안")
+        out["pos_fix_m"] = list(v)
+    if "wifi_host" in d:
+        v = d["wifi_host"]
+        if not isinstance(v, str) or len(v) > 100 or not all(ch.isalnum() or ch in ".-:_" for ch in v.strip()):
+            raise ValueError("wifi_host: 비우기(USB) · auto(핫스팟) · 폰 IP/이름")
+        out["wifi_host"] = v.strip()
+    if "send_fps" in d:
+        v = numbers([d["send_fps"]], 1)
+        if v is None or not 0.2 <= v[0] <= 15:
+            raise ValueError("send_fps: 0.2 ~ 15")
+        out["send_fps"] = v[0]
+    if "text_rot180" in d:
+        if not isinstance(d["text_rot180"], bool):
+            raise ValueError("text_rot180: true / false")
+        out["text_rot180"] = d["text_rot180"]
     if "save_rgbd" in d:
         if not isinstance(d["save_rgbd"], bool):
             raise ValueError("save_rgbd: true / false")
@@ -320,7 +366,7 @@ def read_frame(cfg, now, max_age_s=None):
     return (img, age, mtime) if img is not None else (None, age, None)
 
 
-def evaluate(cfg, table_d, now, prev=None):
+def evaluate(cfg, table_d, now, prev=None, prefer=None):
     """지금 inference.json → 화면에 줄 dict: ok, reason / cube{x, y, yaw_deg}, z, cam, dims_mm, yaw_from, warn[], age_s."""
     path = os.path.join(run_dir(cfg), "inference.json")
     out = {"ok": False, "warn": [], "file": path, "age_s": None, "usable": True}
@@ -330,7 +376,7 @@ def evaluate(cfg, table_d, now, prev=None):
         return {**out, "reason": why, "stale": age is not None}
     c2r = tuple(cfg["camera_to_robot"])
     work = tuple(tuple(cfg[k]) if cfg[k] else None for k in ("work_x_m", "work_y_m", "work_z_m"))
-    pick, why = select_cube(raw, tuple(cfg["cube_dim_mm"]), tuple(cfg["depth_range_m"]), tuple(cfg["cube_labels"]), c2r, work, prev=prev)
+    pick, why = select_cube(raw, tuple(cfg["cube_dim_mm"]), tuple(cfg["depth_range_m"]), tuple(cfg["cube_labels"]), c2r, work, prev=prev, prefer=prefer)
     if pick is None:
         return {**out, "reason": why}
     o = pick["obj"]
@@ -338,6 +384,8 @@ def evaluate(cfg, table_d, now, prev=None):
     warn = out["warn"]
     if list(c2r) == DEFAULT_C2R:
         warn.append("폰 거치 자세가 보정 전 임시값(CAD) — 자리가 몇 cm 틀릴 수 있다 (준비 → 거치 자세 보정)")
+    elif cfg.get("_imu_tilt") and [round(float(v), 4) for v in c2r[:3]] == [round(v, 4) for v in DEFAULT_C2R[:3]]:
+        out.setdefault("note", []).append("거치 자세: 기울기는 폰 중력 센서로 맞춤 · 카메라 자리·yaw 는 CAD 값")
     h = z + table_d                       # 책상 면 위 높이
     if not Z_TOL[0] <= h <= CUBE_SIDE + Z_TOL[1]:
         out["usable"] = False             # 화면이 '집으러 가기' 를 막는다

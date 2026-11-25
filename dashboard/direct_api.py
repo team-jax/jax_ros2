@@ -60,7 +60,7 @@ class Direct:
                 self.fake = FakeArm(self.cfg["interface"], self.cfg["channel"])
             try:
                 p = {"max_speed": float(params.get("max_speed") or R.DEFAULTS["max_speed"])}
-            except ValueError:
+            except (TypeError, ValueError):   # [] · {} 도 (2026-11-25 검토)
                 return {"ok": False, "error": "max_speed 가 숫자가 아님"}
             if not 1.0 <= p["max_speed"] <= 90.0:
                 return {"ok": False, "error": "max_speed 1~90 °/s"}
@@ -162,9 +162,10 @@ def install(app, mode, pm, can_state, trajectory, log_file):
 
     async def body(req):
         try:
-            return await req.json()
+            j = await req.json()
         except Exception:
             return {}
+        return j if isinstance(j, dict) else {}   # [] · null · "문자열" 이 와도 .get 에서 500 으로 죽지 않게
 
     def only_direct():
         return None if mode() == "direct" else JSONResponse({"ok": False, "error": "실물(직접 CAN) 모드에서만"})
@@ -206,7 +207,8 @@ def install(app, mode, pm, can_state, trajectory, log_file):
         if bad:
             return bad
         b = await body(req)
-        return JSONResponse(DIRECT.backend().calib(str(b.get("action") or ""), b.get("joint"), b.get("value")))
+        j = b.get("joint")
+        return JSONResponse(DIRECT.backend().calib(str(b.get("action") or ""), j if j is None else str(j), b.get("value")))   # 목록 joint → 500 막기
 
     @app.post("/api/ik/play_real")
     async def _play(req: Request):

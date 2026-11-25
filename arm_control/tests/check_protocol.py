@@ -92,10 +92,14 @@ def main():
 
     # mapping
     j = cal["wrist_pitch"]
-    check("servo sim 0 -> zero_deg", j.to_motor(0), (90.0, False))
-    check("servo sim 120 clipped to the sim range", j.to_motor(120), (180.0, True))
+    # expected values come from calibration.json (the user retunes zero_deg and the ranges on the real arm), not hard-coded numbers
+    check("servo sim 0 -> zero_deg", j.to_motor(0), (j.zero_deg, False))
+    lo_m, hi_m = j.motor_bounds()     # sim range first, then the servo's own 0..180 (wrist sim range is +-180 since c426a0b, so the servo cuts)
+    want = j.zero_deg + j.sign * j.scale * min(max(120.0, j.sim_range_deg[0]), j.sim_range_deg[1])
+    check("servo sim 120 clipped (sim range, then servo bounds)", j.to_motor(120), (min(max(want, lo_m), hi_m), True))
     e = cal["elbow"]
-    check("AK45 sim 120 clipped to the sim range (limit covers it)", e.to_motor(120), (105.0, True))
+    check("AK45 sim 120 clipped to the sim range (limit covers it)", e.to_motor(120),
+          (e.zero_deg + e.sign * e.scale * e.sim_range_deg[1], True))
     check("AK45 limits cover each sim range", {j.joint: j.limit_deg for j in cal.joints if j.motor == "ak45"},
           {j.joint: max(abs(v) for v in j.sim_range_deg) for j in cal.joints if j.motor == "ak45"})
     check("AK45 sim -10", e.to_motor(-10), (-10.0, False))
@@ -140,7 +144,7 @@ def main():
     far = {"joint_names": ["elbow", "wrist_pitch"], "dt": 0.02,
            "positions": [[radians(110.0), radians(10.0)], [radians(-5.0), radians(10.0)]]}
     check("play: joints past the calibration are named", [(n, round(lo), round(hi), al) for n, lo, hi, al in
-          clipped_joints(far, cal)], [("elbow", -5, 110, [-105.0, 105.0])])
+          clipped_joints(far, cal)], [("elbow", -5, 110, list(cal["elbow"].sim_range_deg))])
 
     # watch: an AK45 more than max_error off (or silent) for longer than grace stops the playback
     from arm_control.watch import TrackingWatch

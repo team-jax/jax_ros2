@@ -28,6 +28,9 @@ class Joint:
     verified: bool = False
     limit_deg: float = None   # AK45 only
     note: str = None
+    clip_ok: bool = False     # True: commands past the allowed range just hold the end, and that is fine (no --force).
+                              # 2026-11-25: finger joint2 servos are straight at servo 0 (their end) and can only bend outward from there,
+                              # so they are held straight; plans that curl them (IK 17 deg, RL 8-30 deg) clip to straight without a warning
 
     def motor_bounds(self):
         if self.motor == "servo":

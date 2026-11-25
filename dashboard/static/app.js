@@ -59,7 +59,7 @@ const rosLabel = () => (S && S.ros.conn && S.ros.conn.state === "connected") ? "
 $("#btn-ros").onclick = rosConnect;
 
 // ---------- 탭 ----------
-const TABS = [["conn", "연결", "켜기"], ["angle", "각도 제어", "관절 움직이기"], ["ik", "역기구학", "집기 계획"]];
+const TABS = [["conn", "연결", "켜기"], ["angle", "각도 제어", "관절 움직이기"], ["ik", "역기구학", "집기 계획"], ["rl", "강화학습", "정책으로 집기"]];
 const OLD_TABS = { ak: "conn", servo: "angle", finger: "angle", arm: "angle", vision: "ik" };   // 예전 주소
 const TAB_IDS = new Set(TABS.map((t) => t[0]));
 const TAB_KEY = "jaxdash.tab";
@@ -77,6 +77,7 @@ function showTab(id) {
     tabBtns[t].setAttribute("aria-selected", t === id ? "true" : "false");
   }
   lsSet(TAB_KEY, id);
+  if (id === "rl" && window.JaxRL) window.JaxRL.mount(document.getElementById("page-rl"));   // 강화학습 탭은 처음 열 때만 만든다 (정책 정보·WebGL)
   if (S) { initViewers(); renderViewers(); updateIkView(); }
   for (const v of Object.values(VW)) if (v && v.resize) { v.resize(); }
   streamSyncAll();
@@ -183,8 +184,28 @@ function renderPhaseLine() {
     el("small", {}, pb.running ? [k, `남은 ${Math.ceil(pb.left_s || 0)}초`, `프레임 ${pb.frame}/${pb.frames - 1}`].filter(Boolean).join(" · ") : k));
 }
 
+// 모드(가상 ↔ 실물 ROS ↔ 직접 CAN)가 바뀌면 '한 번만 묻는' 확인과 손 위치 따라가기를 되돌린다 (2026-11-25 검토:
+// 가상에서 한 번 '예' 를 누르면 실물로 바꾼 뒤 첫 보내기가 경고 없이 실제 팔을 움직였고, 따라가기가 켜진 채 남아 0.2초마다 보냈다)
+let _modeKindSeen = null;
+function resetConfirmsOnModeChange() {
+  const kind = (S.mode || {}).kind || (VIRT() ? "virtual" : "ros");
+  if (_modeKindSeen !== null && kind !== _modeKindSeen) {
+    if (typeof A !== "undefined") A.confirmed = false;
+    if (typeof HK !== "undefined") {
+      HK.warned = false;
+      if (HK.follow) {
+        HK.follow = false; HK.followSent = null; HK.followSol = null;
+        if (HK.f && HK.f.followBox) HK.f.followBox.checked = false;
+        toast("모드가 바뀌어 '팔도 바로 따라가기' 를 껐다");
+      }
+    }
+  }
+  _modeKindSeen = kind;
+}
+
 function render() {
   if (!S) return;
+  resetConfirmsOnModeChange();
   if (!curTab) { const h = location.hash.slice(1); showTab(OLD_TABS[h] || (TAB_IDS.has(h) ? h : (lsGet(TAB_KEY) || "conn"))); }
   const v = VIRT(), r = S.ros, cs = (r.conn || {}).state;
   document.body.classList.toggle("virtual", v);
@@ -523,7 +544,7 @@ function buildPick(s) {
   const P0 = Object.fromEntries(s.params.map((p) => [p.key, p]));
   const fld = (k, lab, unit, w) => {
     const p = P0[k] || { value: "", hint: "", label: k };
-    const inp = el("input", { value: p.value, placeholder: k === "d" ? "0.4775" : k === "ik" ? "비우면 기본" : "", inputmode: k === "ik" ? null : "decimal" });
+    const inp = el("input", { value: p.value, placeholder: k === "d" ? "0.5575" : k === "ik" ? "비우면 기본" : "", inputmode: k === "ik" ? null : "decimal" });
     c.fields[k] = inp;
     return el("label", { class: "field", title: `${p.label}${p.hint ? " (" + p.hint + ")" : ""}`, style: w ? `width:${w}` : null },
       el("span", {}, lab, unit ? el("small", {}, " " + unit) : null), inp);
@@ -558,11 +579,11 @@ function buildPick(s) {
         el("div", { class: "frow" }, el("b", {}, "놓을 자리"), fld("target_x", "x", "m"), fld("target_y", "y", "m")),
         el("div", { class: "help", style: "margin:8px 0 0" }, "로봇 좌표: 원점 = 어깨, +x = 로봇 왼쪽, 앞 = −y, yaw = 위에서 반시계")),
       el("div", { id: "objpose" }),
-      // 책상 높이 (2026-11-23): 어깨 축에서 책상 면까지 아래로 몇 m. 비우면 기본 0.4775. 지도·계획·HOME·손 위치('책상 위 cm')가 이 높이를 쓴다
-      el("div", { class: "frow", title: "어깨 축(shoulder_roll)에서 책상 윗면까지 아래로 잰 거리. 비우면 기본 0.4775 m. 0.44 ~ 0.53 m 만 (책상이 높을수록 = 값이 작을수록 집을 수 있는 곳이 좁다). " +
+      // 책상 높이 (2026-11-23): 어깨 축에서 책상 면까지 아래로 몇 m. 비우면 기본 0.5575 (실물, 2026-11-25 프로파일 8 cm 내림). 지도·계획·HOME·손 위치('책상 위 cm')가 이 높이를 쓴다
+      el("div", { class: "frow", title: "어깨 축(shoulder_roll)에서 책상 윗면까지 아래로 잰 거리. 비우면 기본 0.5575 m (실물 책상). 0.44 ~ 0.60 m 만 (책상이 높을수록 = 값이 작을수록 집을 수 있는 곳이 좁다). " +
         "바꾸면 집을 수 있는 곳 지도를 다시 계산하고(약 1분), 계획·HOME 으로 가기·손 위치의 '책상 위 cm' 가 이 높이를 쓴다" },
         el("b", {}, "책상 높이"), fld("d", "어깨 축 아래", "m"),
-        el("span", { class: "help", style: "padding-bottom:10px" }, "비우면 0.4775 · 0.44~0.53")),
+        el("span", { class: "help", style: "padding-bottom:10px" }, "비우면 0.5575 · 0.44~0.60")),
       // 집는 방향 (2026-11-24): 자동 = 수직 → 수평 → 기울임 순서로 되는 것. 지도(집을 수 있는 곳)·확인·계획이 이 방향을 쓴다
       el("div", { class: "frow", title: "자동: 수직(위에서)이 되면 수직, 안 되는 자리만 수평(옆에서), 그것도 안 되면 손목이 되는 만큼 기울여서. " +
         "수직: 손 축이 수직에서 5° 안, 위에서 곧게. 수평: 손을 눕혀 큐브 옆 4~6 cm 에서 밀어 넣음 — 큐브 면이 팔(어깨) 쪽을 볼 때만 되고, 지도는 지금 큐브 yaw 기준" },
@@ -673,9 +694,9 @@ const foldYaw = (d) => ((((d + 45) % 90) + 90) % 90) - 45;
 const cm = (m) => { const v = Math.round(m * 1000) / 10; return (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(1); };
 const degS = (d) => `${d > 0 ? "+" : d < 0 ? "−" : ""}${Math.abs(Math.round(d))}°`;
 // 책상 높이 칸 (어깨 축 아래 m): tableD() = 서버에 보낼 글자 그대로 (빈 값 = 기본, 범위 검사는 서버 hand_ik.table_d),
-// tableDNum() = 화면 계산용 숫자 (비었거나 숫자가 아니면 기본 0.4775)
+// tableDNum() = 화면 계산용 숫자 (비었거나 숫자가 아니면 기본 0.5575 = 서버 hand_ik.TABLE_D_DEFAULT)
 function tableD() { const f = M.c && M.c.fields.d; return f ? f.value.trim() : ""; }
-function tableDNum() { const v = parseFloat(tableD()); return Number.isFinite(v) ? v : 0.4775; }
+function tableDNum() { const v = parseFloat(tableD()); return Number.isFinite(v) ? v : 0.5575; }
 // 집는 방향 칸: auto / vertical / horizontal. graspQ() = 지도·확인 요청에 붙일 값 (수평은 지금 큐브 yaw 기준 — 큐브 면이 팔 쪽을 볼 때만 되므로)
 function graspMode() { const f = M.c && M.c.fields.grasp; return f ? f.value : "auto"; }
 function graspQ() {
@@ -862,7 +883,7 @@ function mapClick(p) {
   c.fields[k[0]].value = at.x.toFixed(3); c.fields[k[1]].value = at.y.toFixed(3);
   const cc = M.mode === "target" ? cubeCell() : null;
   if (!M.old) {   // 어디든 고를 수 있음 — 판정은 실제 IK (결과 줄)
-    if (M.mode === "cube") mapMode("target");
+    mapNext();
     mapUpdate(); return;
   }
   if (M.mode === "cube" && (!cell || !cell.feasible)) {
@@ -872,8 +893,13 @@ function mapClick(p) {
   if (!cell || !cell.feasible) toast(`⚠ 그 자리는 지도상 ${cell ? "안 되는 칸" : "지도 밖"} — 그래도 계획 돌려 보기는 됨`, "warn");
   else if (cc && !cell.grasps.some((g) => cc.grasps.some((h) => gKey(g) === gKey(h))))
     toast("⚠ 그 칸은 이 큐브를 잡는 손 모양으로는 못 놓음 — 그래도 계획 돌려 보기는 됨", "warn");
-  if (M.mode === "cube") mapMode("target");
+  mapNext();
   mapUpdate();
+}
+// 한 번 고르면 다음 단계로: 큐브 놓기 → 놓을 자리 고르기 → 손 위치 (버튼 순서대로. 다시 고르려면 그 버튼을 누른다. 모드만 바뀌고 팔은 안 움직인다)
+function mapNext() {
+  if (M.mode === "cube") mapMode("target");
+  else if (M.mode === "target") { mapMode("hand"); toast("놓을 자리 골랐음 → 이제 '손 위치' 모드 (다시 고르려면 '놓을 자리 고르기')"); }
 }
 function mapVision(o) {
   if (!M.gVis) return;
@@ -909,7 +935,7 @@ async function graspLoad() {
     if (!d.ok) { G.data = null; if (G.note) G.note.textContent = "⚠ 집을 수 있는 곳 계산 실패: " + (d.reason || "?"); graspPaint(); return; }
     G.data = d; G.other = {};
     if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · ` + (d.grasp && d.grasp !== "auto" ? `집는 방향 ${GRASP_KO[d.grasp]}${d.yaw != null ? ` (큐브 yaw ${d.yaw}°)` : ""} · ` : "") +
-      `손끝(집는 점)을 책상 위 ${d.grip_above_table_m != null ? +(d.grip_above_table_m * 100).toFixed(1) : 3.5} cm 에 · 어깨 옆 ${d.shoulder_yaw}°` + (d.d != null && Math.abs(d.d - 0.4775) > 1e-6 ? ` · 책상 높이 ${d.d} m` : "");
+      `손끝(집는 점)을 책상 위 ${d.grip_above_table_m != null ? +(d.grip_above_table_m * 100).toFixed(1) : 3.5} cm 에 · 어깨 옆 ${d.shoulder_yaw}°` + (d.d != null && Math.abs(d.d - 0.5575) > 1e-6 ? ` · 책상 높이 ${d.d} m` : "");
     graspPaint();
     if (!G.wide || !G.wide.checked) return;
     const base = G.note.textContent;
@@ -1103,7 +1129,7 @@ function checkText(r) {
 // vertical = 손끝 수직(기울기 0), grasp = 팀 IK 원래 값(−40° 고정).
 // 풀기는 자동: 슬라이더를 끄는 동안 = 빠른 풀이(직전 해에서 한 번, fast: true, 최신 것만), 손을 떼거나 숫자를 바꾸면 300 ms 뒤 전체 풀이.
 const HK = { last: null, good: null, fullSeq: 0, fullAt: 0, inflight: false, pending: false, timer: null, busy: false,
-  warned: false, check: null, sentAt: 0, mapD: 0.4775, ghostBad: false, fastT: [], fastLat: [], fastSrv: [],
+  warned: false, check: null, sentAt: 0, mapD: 0.5575, ghostBad: false, fastT: [], fastLat: [], fastSrv: [],
   follow: false, followSent: null, followNote: "", followN: 0 };
 const ARM7 = ["shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow", "wrist_pitch", "wrist_yaw", "hand_roll"];
 const hkSame = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -1844,7 +1870,7 @@ function trajScene() {
   // 큐브·놓을 자리: 지금 칸 값, 없으면 궤적의 real(계획에 쓴 값), 그것도 없으면 마지막 실행 칸
   const t = T.traj, p = (T.info && T.info.params) || {};
   const num = (x) => { const v = parseFloat(x); return Number.isFinite(v) ? v : null; };
-  let cube = null, target = null, d = num(p.d) ?? 0.4775;
+  let cube = null, target = null, d = num(p.d) ?? 0.5575;
   const v = mapVals();   // 지금 지도·숫자칸 값이 먼저 (고르는 중에도 3D 가 따라오게)
   if (v.cube && v.target) { cube = v.cube; target = v.target; d = v.d ?? (t && t.real && t.real.d) ?? d; }
   else if (t && t.real) { cube = { x: t.real.cube[0], y: t.real.cube[1], yaw: t.real.cube[2] }; target = { x: t.real.target[0], y: t.real.target[1] }; d = t.real.d ?? d; }
@@ -1945,7 +1971,7 @@ function buildGoHome() {
   GH.btn = el("button", { class: "btn", onclick: goHome }, "⌂ HOME(원점 자세)으로 가기");
   GH.stop = el("button", { class: "btn line", onclick: stopAll }, "멈춤");
   GH.servo = el("button", { class: "btn line", onclick: sendServosHome,
-    title: "서보는 위치 피드백이 없어 한 번도 안 보낸 서보는 재생·HOME 이 거절한다. 계획 시작 값(손목 3개 0°, 손가락 벌림 −15°/0°)을 한 번에 보낸다 — 첫 명령이라 램프 없이 바로 튄다" },
+    title: "서보는 위치 피드백이 없어 한 번도 안 보낸 서보는 재생·HOME 이 거절한다. 계획 시작 값(손목 3개 0°, 손가락 벌림 −15°/0°, 손가락 회전 0°)을 한 번에 보낸다 — 램프 없이 바로 그 각으로 간다" },
     "서보 한 번에 보내기");
   GH.vb = el("span", { class: "vbadge", hidden: true }, "가상");
   GH.note = el("div", { class: "note" });
@@ -1971,12 +1997,14 @@ function renderGoHome() {
   GH.wasRun = !!pb.running;
 }
 // 계획·HOME 시작 서보 값 (sim °): 손목 3개 0, 손가락 = IK env FINGER_OPEN (첫 마디 −0.26 rad, 둘째 0) = pick_plan open_exit
+// finger_rotation 0° = 손가락 3 이 손가락 1·2 와 마주 보는 자세 (역기구학 계획이 가정하는 방향). 강화학습 재생은 이 서보를 180° 로 돌려 두므로 여기서 0 으로 되돌린다.
 const SERVO_HOME_DEG = { wrist_pitch: 0, wrist_yaw: 0, hand_roll: 0,
-  finger1_joint1: -14.9, finger1_joint2: 0, finger2_joint1: -14.9, finger2_joint2: 0, finger3_joint1: -14.9, finger3_joint2: 0 };
+  finger1_joint1: -14.9, finger1_joint2: 0, finger2_joint1: -14.9, finger2_joint2: 0, finger3_joint1: -14.9, finger3_joint2: 0,
+  finger_rotation: 0 };
 async function sendServosHome() {
-  if (!confirm((VIRT() ? "(가상) " : "⚠ 실물 서보가 움직인다.\n\n") + "서보 9개(손목 3개 0°, 손가락 벌림)를 한 번에 보낼까요?\n" +
-    "처음 보내는 서보는 램프 없이 그 각으로 바로 튄다 — 손 주변을 비우세요.")) return;
-  const r = await post("/api/joint/send", { joints: SERVO_HOME_DEG });
+  if (!confirm((VIRT() ? "(가상) " : "⚠ 실물 서보가 움직인다.\n\n") + "서보 10개(손목 3개 0°, 손가락 벌림, 손가락 회전 0°)를 한 번에 보낼까요?\n" +
+    "램프 없이 그 각으로 바로 간다 (빠르게 튄다) — 손 주변을 비우세요.")) return;
+  const r = await post("/api/joint/send", { joints: SERVO_HOME_DEG, instant: true });   // 서보만 램프 없이 바로 (2026-11-25 사용자)
   if (r.ok) toast(r.msg || "서보 보냄"); else toast(r.error || "못 보냄", "error");
 }
 async function goHome() {

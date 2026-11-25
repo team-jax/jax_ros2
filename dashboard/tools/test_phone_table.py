@@ -83,8 +83,8 @@ for k, (name, d, kw, tilt_max) in enumerate(CASES):
     good = abs(err) <= 4.0 and (r["tilt_deg"] <= tilt_max if tilt_max is not None else abs(r["tilt_deg"] - 3.0) < 0.5 and any("기울어" in w for w in r["warn"]))
     check(f"ArUco {name}", good, f"d {r['d']:.4f} (오차 {err:+.1f} mm, ± {r['d_pm_mm']} mm) · 기울기 {r['tilt_deg']}° · 사진 회전 {r['image_rot_deg']}° · "
           f"초점 {r['f_px']} (참 {kw.get('f', 1250)}) · 재투영 {r['reproj_px']} px · CAD 회전으로 읽으면 {r['d_cad_rot']:.4f} · 마커 {len(r['refs'])}개")
-c = PT.combine(PT.measure_aruco(photo(0.56)), None)
-check("범위 밖 (d 0.56) 은 값은 주고 넣지 않음", c["ok"] and not c["in_range"] and abs(c["d"] - 0.56) < 0.004 and "범위" in c.get("reason", ""), f"d {c.get('d')}")
+c = PT.combine(PT.measure_aruco(photo(0.62)), None)   # 받는 범위 0.44 ~ 0.60 (2026-11-25 넓힘, 실물 책상 0.557)
+check("범위 밖 (d 0.62) 은 값은 주고 넣지 않음", c["ok"] and not c["in_range"] and abs(c["d"] - 0.62) < 0.006 and "범위" in c.get("reason", ""), f"d {c.get('d')}")
 r = PT.measure_aruco(np.full((600, 800, 3), 128, np.uint8))
 check("마커 없는 사진 → 이유", not r["ok"] and "마커" in r["reason"])
 

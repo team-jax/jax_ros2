@@ -677,11 +677,12 @@ class RealArm:
             return "연결 닫는 중"
         return None if self.running else "팔 연결 안 됨 (직접 CAN) — 연결 탭 ② 팔 연결"
 
-    def send_joint_command(self, names, positions):
-        """sim 관절명, rad. arm_control_node + homing_guard 와 같은 변환: calibration(클립) → 원점 오프셋 → 램프."""
-        return self.joint_command(list(names), [float(p) for p in positions])
+    def send_joint_command(self, names, positions, instant=False):
+        """sim 관절명, rad. arm_control_node + homing_guard 와 같은 변환: calibration(클립) → 원점 오프셋 → 램프.
+        instant = 서보만 램프 없이 바로 그 각 (각도 제어 '서보 한 번에 보내기', 2026-11-25 사용자). AK45 는 늘 램프."""
+        return self.joint_command(list(names), [float(p) for p in positions], instant=instant)
 
-    def joint_command(self, names, positions, _source="화면"):
+    def joint_command(self, names, positions, _source="화면", instant=False):
         why = self._ready()
         if why:
             return {"ok": False, "error": why}
@@ -704,6 +705,9 @@ class RealArm:
                     clipped.append(f"{n} → 모터 {mdeg:.1f}°")
                 if j.motor == "servo":
                     self.servo_mover.set_target(n, mdeg)
+                    if instant:     # 램프 없이: 지금 값 = 목표, 바로 한 번 보낸다 (그 뒤 재전송은 servo_resend_hz)
+                        self.servo_mover.start(n, mdeg)
+                        self._servo_send(j, mdeg, now)
                     done.append(n)
                     continue
                 m = self.ak[f"ak45_{j.id}"]
@@ -790,6 +794,8 @@ class RealArm:
         if not service.startswith(prefix):
             return {"ok": False, "error": f"{service}: 모르는 서비스"}
         act, _, joint = service[len(prefix):].partition("_")
+        if act == "home" and self.play.get("running"):   # 2026-11-25 검토: 재생 중 원점을 다시 잡으면 남은 프레임이 그만큼 밀려 보정 범위 밖으로 갔다
+            return {"ok": False, "error": "재생 중 — 멈춘 뒤 원점"}
         hm = self.homing
         try:
             if joint == "all":
@@ -883,6 +889,13 @@ class RealArm:
                     new = base + dv
                     if abs(new) > self.p["max_command_deg"]:
                         return {"ok": False, "error": f"모터 {new:.1f}° 가 ±{self.p['max_command_deg']:g}° 밖"}
+                    # 원점을 잡았으면 보정 범위 (zero ± limit) + 한 번 이동폭 까지만 (2026-11-25 검토: 클릭을 쌓으면 어디까지든 갔다 —
+                    # calibrate.py move_motor 는 motor_bounds 밖을 거절). 원점 전에는 모터 각의 기준이 없어 상대 이동 제한만.
+                    if self.homing.m[m.name].homed:
+                        lo, hi = j.motor_bounds()
+                        mg = float(self.p["calib_step_max"])
+                        if not lo - mg <= new <= hi + mg:
+                            return {"ok": False, "error": f"모터 {new:.1f}° 가 보정 범위 {lo:.0f}..{hi:.0f}° (+여유 {mg:g}°) 밖 — 영점·범위를 먼저 고치기"}
                     m.target = new
                     m.pressed = False
                     text = f"보정 {j.joint}({m.name}): 모터 {base:+.2f}° → {new:+.2f}° (지금 {m.pos:+.2f}°)"
@@ -1010,7 +1023,8 @@ class RealArm:
         import play_phase
         self.play = {"running": True, "frame": 0, "frames": n, "period": period, "slow": slow, "hold": hold,
                      "seconds": hold + (n - 1) * period, "started": time.time(), "reason": None, "real": True,
-                     "phases": play_phase.phases(traj)}   # 지금 무슨 동작 (snapshot 이 play_phase.view 로)
+                     "phases": play_phase.phases(traj),   # 지금 무슨 동작 (snapshot 이 play_phase.view 로)
+                     "holding": True}   # holding: 첫 자세를 hold 초 유지하는 동안 팔은 안 움직인다 — 화면이 '멈춘 것'으로 오해하지 않게
         state = {"k": 0}
 
         def publish(nm, positions):
@@ -1056,6 +1070,7 @@ class RealArm:
                     return r
                 if self._play_stop.wait(0.1):
                     return "stopped"
+            self.play["holding"] = False
             for frame in frames[1:]:
                 r = step(frame)
                 if r:

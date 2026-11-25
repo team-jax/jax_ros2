@@ -75,6 +75,8 @@ class ArmModel {
     placeFrom(el, g);
     parent.add(g);
     let content = g;
+    // 손가락 3 의 RotationBody: arm.xml 은 −π 로 굳혀 둠. 강화학습(/rl)은 이 관절을 돌린다 → setPose 의 'rl_rotation'(rad)으로 q0 · Rot_z(θ+π)
+    if (el.getAttribute("name") === "RotationBody") this.rotBody = { obj: g, q0: g.quaternion.clone() };
     const j = kids(el, "joint").find((x) => (x.getAttribute("type") || "hinge") === "hinge");
     if (j) {
       const jg = new THREE.Group();
@@ -125,6 +127,11 @@ class ArmModel {
       const v = q && Number.isFinite(q[name]) ? q[name] : 0;
       j.obj.quaternion.setFromAxisAngle(j.axis, v);
     }
+    if (this.rotBody) {   // 키가 없으면(다른 탭) 굳은 자세 그대로
+      const r = q && Number.isFinite(q.rl_rotation) ? q.rl_rotation : null;
+      this.rotBody.obj.quaternion.copy(this.rotBody.q0);
+      if (r !== null) this.rotBody.obj.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), r + Math.PI));
+    }
   }
 }
 
@@ -143,7 +150,7 @@ export class Viewer {
   constructor(container, opts = {}) {
     this.el = container;
     this.opts = opts;
-    this.d = 0.4775;
+    this.d = 0.5575;   // 실물 책상 기본 (hand_ik.TABLE_D_DEFAULT) — 강화학습 탭은 setTableD 로 정책 장면 0.4775
     this.status = document.createElement("div");
     this.status.className = "v3d-status";
     container.append(this.status);
@@ -254,6 +261,61 @@ export class Viewer {
     if (c) { this.cube.position.set(c.x, c.y, -this.d + CUBE / 2); this.cube.rotation.set(0, 0, (c.yaw || 0) * Math.PI / 180); }
     this.dirty();
   }
+  setCubePose(p, q) {   // 강화학습: 큐브 중심 p=[x,y,z](로봇 틀, m), 자세 q=[x,y,z,w] — 들리고 기울어도 그대로 (setCube 는 책상 위 고정)
+    this.cube.visible = !!p;
+    if (p) { this.cube.position.set(p[0], p[1], p[2]); if (q) this.cube.quaternion.set(q[0], q[1], q[2], q[3]); }
+    this.dirty();
+  }
+  setBoxTable(t) {   // 강화학습 장면의 책상: {center:[x,y,z], size:[sx,sy,sz]} (로봇 틀). 기존 책상(this.table)은 안 건드림
+    if (this.boxTable) { this.scene.remove(this.boxTable); this.boxTable.geometry.dispose(); this.boxTable.material.dispose(); this.boxTable = null; }
+    if (t) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(...t.size),
+        new THREE.MeshStandardMaterial({ color: 0xd6b98c, metalness: 0, roughness: 0.85, transparent: true, opacity: 0.8 }));
+      m.position.set(...t.center);
+      this.boxTable = m; this.scene.add(m);
+    }
+    this.dirty();
+  }
+  // 카메라(비전) 표시: c = {t:[x,y,z] m, rpy:[roll,pitch,yaw] °, hfov °, aspect, near, far} 또는 null. 로봇 틀.
+  // 변환은 vision_node.camera_to_robot 과 같다: p_robot = Rz(yaw)·Ry(pitch)·Rx(roll)·p_cam + t, 카메라 틀 = OpenCV (x 오른쪽, y 아래, z 앞).
+  // 그려지는 것: 본체 상자, 축(x 빨강·y 초록·z 파랑 = 보는 방향), 시야 원뿔(가까운·먼 면), 이름표.
+  setCamera(c) {
+    if (this.camGroup) {
+      this.scene.remove(this.camGroup);
+      this.camGroup.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
+      this.camGroup = null;
+    }
+    if (c) {
+      const r = Math.PI / 180;
+      const M = new THREE.Matrix4().makeRotationZ(c.rpy[2] * r)
+        .multiply(new THREE.Matrix4().makeRotationY(c.rpy[1] * r)).multiply(new THREE.Matrix4().makeRotationX(c.rpy[0] * r));
+      M.setPosition(c.t[0], c.t[1], c.t[2]);
+      const g = new THREE.Group();
+      g.matrixAutoUpdate = false; g.matrix.copy(M);
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.045, 0.04), new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.3, roughness: 0.5 }));
+      body.position.set(0, 0, -0.02); g.add(body);
+      const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.02, 16), new THREE.MeshStandardMaterial({ color: 0x2563eb }));
+      lens.rotation.x = Math.PI / 2; lens.position.set(0, 0, 0.008); g.add(lens);
+      for (const [dir, col] of [[[0.1, 0, 0], 0xdc2626], [[0, 0.1, 0], 0x16a34a], [[0, 0, 0.1], 0x2563eb]]) {
+        g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(...dir)]), new THREE.LineBasicMaterial({ color: col })));
+      }
+      const th = Math.tan(c.hfov * r / 2), tv = th / (c.aspect || 4 / 3);
+      const corner = (d, sx, sy) => new THREE.Vector3(sx * th * d, sy * tv * d, d);
+      const pts = [];
+      for (const d of [c.near, c.far]) {
+        const q = [corner(d, -1, -1), corner(d, 1, -1), corner(d, 1, 1), corner(d, -1, 1)];
+        for (let i = 0; i < 4; i++) pts.push(q[i], q[(i + 1) % 4]);
+      }
+      for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) pts.push(new THREE.Vector3(), corner(c.far, sx, sy));
+      g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x2563eb, transparent: true, opacity: 0.7 })));
+      const far = new THREE.Mesh(new THREE.PlaneGeometry(2 * th * c.far, 2 * tv * c.far),
+        new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.07, side: THREE.DoubleSide, depthWrite: false }));
+      far.position.set(0, 0, c.far); g.add(far);
+      const lab = textSprite("카메라", "#1d4ed8"); lab.position.set(0.05, -0.04, 0.02); lab.scale.set(0.2, 0.05, 1); g.add(lab);
+      this.camGroup = g; this.scene.add(g);
+    }
+    this.dirty();
+  }
   setTarget(t) {
     this.target.visible = !!t;
     if (t) this.target.position.set(t.x, t.y, -this.d + CUBE / 2);
@@ -334,5 +396,12 @@ export class Viewer {
   }
 }
 
+// WebGL 을 못 써 constructor 가 일찍 끝나면(dead) 장면 물체가 없다 — 모든 메서드를 아무 일 없이 끝나게 한다
+// (2026-11-25 검토: setCube 등이 던져서 app.js render() 가 통째로 멈추고, RL 탭은 성공한 시뮬을 '서버 요청 실패' 로 보였다)
+for (const k of Object.getOwnPropertyNames(Viewer.prototype)) {
+  const f = Viewer.prototype[k];
+  if (k === "constructor" || typeof f !== "function") continue;
+  Viewer.prototype[k] = function (...a) { return this.dead ? undefined : f.apply(this, a); };
+}
 window.JaxViewer = { create: (el, opts) => new Viewer(el, opts) };
 window.dispatchEvent(new Event("jaxviewer-ready"));

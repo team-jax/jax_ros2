@@ -143,7 +143,12 @@ class VirtualArm:
     def _start_node(self, n, owner, params):
         now = time.monotonic()
         self.nodes[n] = {"since": now, "owner": owner, "params": dict(params)}
-        speed = float(params.get("max_speed_deg_s") or 30.0)
+        try:     # 검사는 procman 이 build 로 한다 — 그래도 숫자가 아니거나 0 이하면 기본 (음수면 Mover 가 거꾸로 간다)
+            speed = float(params.get("max_speed_deg_s") or 30.0)
+        except (TypeError, ValueError):
+            speed = 30.0
+        if not (math.isfinite(speed) and speed > 0):
+            speed = 30.0
         if n == "ak45":
             for m in self.motors.values():
                 m.has_target = m.temp_locked = m.command_active = False

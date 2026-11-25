@@ -63,6 +63,11 @@ try:   # 실물 램프 가속(°/s²) — real_arm.DEFAULTS 한 곳에서 읽는
 except Exception:   # real_arm 을 못 읽는 곳(팀 PC 등)에선 보수적으로 같은 기본값 — 경고를 남긴다
     MAX_ACC = 90.0
     print("pick_plan: real_arm.DEFAULTS 를 못 읽어 MAX_ACC 90 °/s² 가정", file=sys.stderr)
+PICK_DROP_M = 0.0            # 0 (2026-11-25 오후): '손이 8 cm 위에서 멈춤' 의 원인 = 실물 책상이 어깨 아래 0.557 m (기본 0.4775 보다 8 cm 낮음, 폰 IMU·큐브
+                             # 마커로 잼) → 책상 높이 d 를 실제 값으로 넣으면 집기·놓기·HOME 이 모두 맞는다. 둘을 같이 쓰면 16 cm 내려간다.
+                             # (예전 0.08: 실물에서 손이 큐브보다 약 8 cm 위에서 멈춤 → 집는 자리의 큐브를 모델 책상보다 이만큼 아래로 보고
+                             # 집기·들기(큐브 위 → 내려감 → 잡기 → 들기)만 그만큼 낮게 계획한다. 놓기·옮겨 가는 높이(z_clear)·HOME 은 그대로.
+                             # 책상 충돌 검사 바닥도 이만큼 내린다 (안 그러면 낮춘 잡는 자세가 '책상 아래'로 거절). --pick-drop 으로 바꿈 (0 = 예전)
 TABLE_MARGIN = 0.008         # 손가락 충돌 상자·들고 가는 큐브 바닥이 책상 면보다 이만큼(m) 위여야 (실물 책상 높이 MAP_D 0.4775 는 가정 —
                              # 실측 전엔 오차가 이 여유를 먹는다. README). 집는 점 = 큐브 중심이던 때는 수직 손에서 쥔 손가락 8.5 mm 위라
                              # 손이 조금만 기울어도 못 지켰다 → 2026-11-21 집는 점 +1 cm (GRIP_ABOVE_CENTER, 수직이면 18.5 mm 위)
@@ -190,6 +195,7 @@ class Planner:
         if grasp not in GRASP_MODES:
             raise ValueError(f"집는 방향은 {' / '.join(GRASP_MODES)} 중 하나 ({grasp!r})")
         self.grasp = grasp   # 집는 방향 (auto / vertical / horizontal): point_check 가 이 방식으로 본다. 계획기의 다른 상태는 방식과 상관없다
+        self.pick_drop = 0.0   # 집기·들기만 낮춤 (m): plan() 이 PICK_DROP_M 으로 바꾼다. 지도·탑 쌓기 판정(이 계획기를 직접 쓰는 곳)은 0
         self.s = s = solver
         self.table_d = float(s.table_d)
         self.np = np = s.np
@@ -201,7 +207,10 @@ class Planner:
         if FINGER_OPEN_J1_DEG is not None:   # 내려가고 빠질 때 손가락을 더 벌림 (첫 마디 = 각 손가락 joint1, 6 개 중 0·2·4)
             self.open[[0, 2, 4]] = math.radians(FINGER_OPEN_J1_DEG)
         self.closed = np.asarray(s.env.finger_targets(1.0), dtype=float)   # 팀 계획이 들고 갈 때 쓰는 값 (grip 1.0)
-        self.home = np.asarray(s.E.HOME_ARM_QPOS, dtype=float)
+        # HOME = 모든 관절 0 (실물 원점 = 팔이 곧게 늘어진 자세, 대시보드 'HOME 으로 가기'·README). IK 레포의 env HOME_ARM_QPOS 는
+        # sim 의 손바닥-아래 자세라 0 이 아니다(팀 최신 IK 에선 0) — 그걸 그대로 쓰면 HOME 이 위팔 143°·손목 −90° 가 되어
+        # 관절 한계·기둥 검사에 걸리고 지도 초록 칸이 0 이 된다 (2026-11-24). HOME_FROM_IK=True 면 예전처럼 env 값.
+        self.home = np.asarray(s.home_arm, dtype=float)   # hand_ik._Solver.home_arm (JAX_HOME_FROM_IK=1 이면 env 값)
         self.home0 = self.home.copy()
         self.home0[s.arm.index("shoulder_yaw")] = 0.0   # 해석 IK 는 shoulder_yaw 0 고정 → 계획은 HOME 에서 먼저 그것만 0 으로
         self.cube_grip = float(getattr(s.E, "CUBE_GRIP", 1.0))
@@ -1134,13 +1143,20 @@ def plan(a):
     if a.d is not None and not (math.isfinite(a.d) and D_RANGE[0] - 1e-9 <= a.d <= D_RANGE[1] + 1e-9):   # 모델을 읽기 전에 거절
         import hand_ik
         return {"planner": "analytic", "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": float(a.d)},
-                "status": "unreachable", "reason": d_range_text(a.d, hand_ik._map_d(ik_dir))}
+                "status": "unreachable", "reason": d_range_text(a.d, hand_ik.TABLE_D_DEFAULT)}
     rng = _cmd_ranges(cal_file)
     if grasp == "tilted":   # 어제(11-23 20:22) 실물에서 성공한 계획과 같게: 손목 ±90, 기울여 집기만
         rng = tilt_ranges(rng)
     P = Planner(ik_dir, rng, d=a.d, grasp=grasp)
+    drop = getattr(a, "pick_drop", None)
+    drop = PICK_DROP_M if drop is None else float(drop)
+    if not (math.isfinite(drop) and 0.0 <= drop <= 0.15):
+        return {"planner": "analytic", "status": "unreachable", "reason": f"집기 낮춤은 0 ~ 15 cm ({drop * 100:g} cm)"}
+    P.pick_drop = drop
+    P.s.table_z -= drop   # 책상 충돌 검사 바닥 = 낮춘 집는 자리 (z_clear·HOME 경유점은 위 Planner 에서 이미 실제 책상으로 정함)
     out = {"planner": "analytic",
-           "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": P.table_d, "grasp": grasp}}
+           "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": P.table_d, "grasp": grasp,
+                    "pick_drop_m": drop}}
     level, obst_real, _ = _stack_args(a, P)   # 탑 쌓기 (--place-level, --obstacle): 안 주면 0, [] — 예전과 똑같다
     lifts = [0.0]
     if level or obst_real:
@@ -1231,15 +1247,17 @@ def _plan_style(a, P, style, out):
             what = f"놓을 자리 {level + 1}층 (책상 위 {up * 100:.1f} cm)"
         if not P.on_table(s.to_sim([x, y, 0.0])):
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {P.off_table_why()}"}
-        code = 2 if (hz or up) else s.grasp_eval(P.S, x, y, verify=True, check=False)[0]   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로). 수평은 손목이 큐브 위가 아니라 옆
+        code = 2 if (hz or up or (what == "큐브" and P.pick_drop)) else s.grasp_eval(P.S, x, y, verify=True, check=False)[0]   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로). 수평은 손목이 큐브 위가 아니라 옆
         if code == 0:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {REASON[code]}"}
-        ok, why, _ = P.point_check(np.asarray(s.to_sim([x, y, float(s.E.OBJECT_HALF_SIZE) - D + up])),
+        down = P.pick_drop if what == "큐브" else 0.0   # 집는 자리만 PICK_DROP_M 아래
+        ok, why, _ = P.point_check(np.asarray(s.to_sim([x, y, float(s.E.OBJECT_HALF_SIZE) - D + up - down])),
                                    yaws=[(cyaw if what == "큐브" else tyaw) + R.SIM_FROM_REAL_YAW], style=style)
         if not ok:
-            return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {why}"}
+            note = f" (집는 자리를 모델 책상보다 {P.pick_drop * 100:g} cm 아래로 계획 중 — --pick-drop)" if (down and what == "큐브") else ""
+            return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {why}{note}"}
     zc = float(s.E.OBJECT_HALF_SIZE) - D   # 큐브 중심 높이 (실좌표, 어깨 축 기준). 놓을 때도 큐브 바닥 = 책상
-    pc = np.asarray(s.to_sim([cx, cy, zc]))      # 큐브 중심 (sim) — 손가락↔큐브 검사·들고 가는 큐브
+    pc = np.asarray(s.to_sim([cx, cy, zc - P.pick_drop]))      # 큐브 중심 (sim) — 집는 자리는 PICK_DROP_M 아래 — 손가락↔큐브 검사·들고 가는 큐브
     pt = np.asarray(s.to_sim([tx, ty, zc + lift_z]))   # 탑 쌓기면 그 층 높이
     gc, gt = (P.h_grip_target(pc), P.h_grip_target(pt)) if hz else (P.grip_target(pc), P.grip_target(pt))   # 집는 점 목표 = 큐브 중심 + GRIP_ABOVE_CENTER (수평은 H_GRIP_ABOVE)
     ycube = cyaw + R.SIM_FROM_REAL_YAW        # sim yaw (mod 90 만 쓴다)
@@ -1483,7 +1501,7 @@ def _plan_style(a, P, style, out):
     g_text = f"집는 방향: {ko} (기울기 {g_tilt:.0f}°)"
     if style == "tilted" and g_tilt <= VERT_MAX_TILT:   # 자동에서 수직 조건(곧게 수직으로 내려가기·놓는 손도 수직)은 못 채웠지만 잡는 손은 곧다
         g_text = f"집는 방향: {ko} (잡는 손 기울기 {g_tilt:.0f}°, 놓는 손 {tilt_of(qp):.0f}° · 비스듬히 내려가거나 놓는 손이 기울어 '수직' 조건 밖)"
-    labels = {"start": "start (HOME)", "above_pick": f"큐브 위 (+{ha:g} cm, 수직에서 {ap['tilt_deg']}°)", "grasp": "내려감: 큐브 잡는 자세",
+    labels = {"start": "start (HOME)", "above_pick": f"큐브 위 (+{ha:g} cm, 수직에서 {ap['tilt_deg']}°)", "grasp": "내려감: 큐브 잡는 자세" + (f" (모델 책상보다 {P.pick_drop * 100:g} cm 아래)" if P.pick_drop else ""),
               "close": "손가락 닫기", "closed": "기다림", "lift": "들기", "above_place": f"놓을 자리 위 (+{hb:g} cm, 수직에서 {bp['tilt_deg']}°)",
               "place": "내려감: 놓는 자세", "open": "손가락 열기", "opened": "기다림", "lift2": "들기",
               "home0": "HOME (shoulder_yaw 만 0)" if "home" in mk else "HOME", "home": "HOME",
@@ -1742,7 +1760,7 @@ def plan_place_from(q_start_deg, fingers_start_deg, cube_real, target_xy, target
     ik_dir = _find_ik(ik)
     if d is not None and not (math.isfinite(d) and D_RANGE[0] - 1e-9 <= d <= D_RANGE[1] + 1e-9):
         import hand_ik
-        return no(d_range_text(d, hand_ik._map_d(ik_dir)))
+        return no(d_range_text(d, hand_ik.TABLE_D_DEFAULT))
     P = Planner(ik_dir, ranges, d=d)
     s, np = P.s, P.np
     R = s.R
@@ -1986,6 +2004,8 @@ def main(argv=None):
                     help="탑 쌓기: 큐브 바닥을 책상 위 K·5 cm 에 놓는다 (0 = 책상, 기본)")
     ap.add_argument("--obstacle", type=float, nargs=4, action="append", default=None, metavar=("X", "Y", "YAW", "LEVEL"),
                     help="다른 큐브 (실좌표 m·°, LEVEL 0 = 책상 위, 1 = 그 위 …). 여러 번 줄 수 있다")
+    ap.add_argument("--pick-drop", type=float, default=None,
+                    help=f"집기·들기만 이만큼(m) 낮게 (기본 PICK_DROP_M {PICK_DROP_M:g}, 0 = 낮추지 않음)")
     ap.add_argument("--ik", default=None)
     ap.add_argument("--save", default=None)
     add_run_args(ap)

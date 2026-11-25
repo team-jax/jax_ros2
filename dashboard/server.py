@@ -313,9 +313,15 @@ def _send_joints(b):
         names.append(n)
         rads.append(math.radians(float(v)))
         shown.append(f"{n} {float(v):.1f}°")
-    r = backend().send_joint_command(names, rads)
+    fn = backend().send_joint_command
+    instant = (b if isinstance(b, dict) else {}).get("instant") is True
+    import inspect
+    if instant and "instant" in inspect.signature(fn).parameters:   # 직접 CAN: 서보를 램프 없이 바로 (가상·ROS 는 늘 램프)
+        r = fn(names, rads, instant=True)
+    else:
+        r = fn(names, rads)
     if r.get("ok"):
-        r["msg"] = (r.get("msg") or "보냄") + " — " + ", ".join(shown)
+        r["msg"] = (r.get("msg") or "보냄") + (" (서보 바로)" if instant else "") + " — " + ", ".join(shown)
     return r
 
 
@@ -358,7 +364,7 @@ def _trajectory():
 
 
 def _play_virtual(trajectory=None):
-    """trajectory: 궤적을 주는 함수 (기본 = 역기구학 탭 계획 _trajectory, 강화학습 탭은 rl_api._traj)."""
+    """trajectory: 궤적을 주는 함수 (기본 = 역기구학 탭 계획 _trajectory)."""
     if not MODE["virtual"]:
         return {"ok": False, "error": "가상 모드에서만 (실물 재생은 대시보드에 없음)"}
     t = (trajectory or _trajectory)()
@@ -438,6 +444,170 @@ def index():
     return FileResponse(str(HERE / "static" / "index.html"))
 
 
+@app.get("/rl")
+def rl_page():
+    """강화학습 돌리기 (역기구학 집기와 따로, 시뮬 전용): static/rl.html"""
+    return FileResponse(str(HERE / "static" / "rl.html"))
+
+
+@app.get("/api/rl/info")
+async def api_rl_info():
+    import rl_run
+    r = await asyncio.to_thread(rl_run.info, _ik_dir())
+    return JSONResponse({**r, "robot": robot_info()})   # robot.mesh_ok: 3D 메시를 줄 수 있나 (없으면 막대 모델)
+
+
+@app.post("/api/rl/run")
+async def api_rl_run(req: Request):
+    import rl_run
+    b = await _body(req)
+    if isinstance(b, dict):
+        b = dict(b, limits_deg=_rl_real_limits())
+    return JSONResponse(await asyncio.to_thread(rl_run.run, _ik_dir(), b))
+
+
+@app.post("/api/rl/vision")
+async def api_rl_vision(req: Request):
+    """카메라 프로그램의 inference.json 에서 큐브 하나 → 로봇 틀 위치·RL 위치 오프셋 (ROS 없이, vision_node 의 순수 함수)."""
+    import rl_run
+    return JSONResponse(await asyncio.to_thread(rl_run.read_vision, await _body(req)))
+
+
+def _rl_real_limits():
+    """실물 보정(zero_deg·모터 범위)이 허용하는 sim 각도 범위 {관절: [lo°, hi°]}. 연결돼 있으면 그 팔의 메모리 보정, 아니면 저장 파일.
+    RL 의 '놓을 자리까지 옮기기' IK 가 이 안에서만 풀게 넘긴다 (안 그러면 손목을 −74° 비틀어 실물 재생이 막힌다)."""
+    try:
+        out = {}
+        if mode_kind() == "direct" and direct_api.DIRECT.connected():
+            for j in direct_api.DIRECT.arm.cal.joints:
+                lo, hi = j.motor_bounds()
+                a, b = sorted((j.to_sim(lo), j.to_sim(hi)))
+                out[j.joint] = [max(a, j.sim_range_deg[0]), min(b, j.sim_range_deg[1])]
+        else:
+            for j in json.loads(CALIB_FILE.read_text(encoding="utf-8"))["joints"]:
+                r = _cmd_range(j)
+                if r:
+                    out[j["joint"]] = r
+        return out
+    except Exception:
+        return {}
+
+
+RL_CLIP_TOL_DEG = 1.0   # 실물 보정 범위 밖으로 이만큼(°) 넘게 잘리는 RL 궤적은 실물로 안 보낸다 (그 아래는 부동소수점·0° 근처 정도)
+
+
+def _rl_clip_split(traj, cal):
+    """실물 보정 범위(calibration)에 잘리는 관절을 (크게 잘림, 조금 잘림)으로 나눔. 조금 = RL_CLIP_TOL_DEG 이하."""
+    from arm_control.play import clipped_joints
+    big, small = [], []
+    for name, lo, hi, allowed in clipped_joints(traj, cal):
+        over = max(allowed[0] - lo, hi - allowed[1], 0.0)
+        (big if over > RL_CLIP_TOL_DEG else small).append((name, lo, hi, allowed, over))
+    return big, small
+
+
+@app.get("/api/rl/real_state")
+def api_rl_real_state(run_id: str = "", grip_gain: str = "", grip_add_deg: str = ""):
+    """RL 탭의 '실물로 재생' 카드: 지금 모드·연결·원점·서보·첫 프레임과의 거리·재생 상태 (읽기만, 아무것도 안 보낸다)."""
+    import rl_run
+    kind = mode_kind()
+    out = {"mode": kind, "connected": False, "can_play": False, "why": ""}
+    if kind != "direct":
+        out["why"] = "실물(직접 CAN) 모드에서만 — 지금은 " + ("가상" if kind == "virtual" else "ROS") + " 모드"
+        return out
+    if not direct_api.DIRECT.connected():
+        out["why"] = "팔 연결 안 됨 — 연결 탭 ② 팔 연결"
+        return out
+    arm = direct_api.DIRECT.arm
+    out["connected"] = True
+    try:
+        out["not_homed"] = [n for n, j in arm.joints.items() if j.motor == "ak45" and not arm.homing.m[f"ak45_{j.id}"].homed]
+        out["unsent_servos"] = [n for n, j in arm.joints.items() if j.motor == "servo" and j.name not in arm.servo_sent]
+        out["playback"] = dict(arm.play)
+        out["max_speed"] = float(arm.p["max_speed"])
+        out["calib_dirty"] = bool(arm.calib_dirty)
+        res = rl_run.get_run(run_id) if run_id else None
+        if res:
+            try:
+                grip = rl_run.grip_params(grip_gain, grip_add_deg)
+            except ValueError as e:
+                grip = None
+                out["grip_error"] = str(e)
+            t = rl_run.real_traj(res, grip=grip, limits=_rl_real_limits())     # 재생할 때와 같은 궤적으로 검사
+            out["grip_extra_deg"] = t.get("grip_extra_deg")
+            out["far"] = arm._start_far(t["joint_names"], t["positions"][0], direct_api.R.START_TOL_DEG)   # play_trajectory 가 거절하는 기준과 같게
+            big, small = _rl_clip_split(t, arm.cal)
+            out["clip_big"] = [f"{n} {lo:.0f}..{hi:.0f}° (허용 {al[0]:.0f}..{al[1]:.0f}°)" for n, lo, hi, al, _ in big]
+    except Exception as e:     # 상태 표시용이라 실패해도 화면이 죽지 않게
+        out["why"] = f"상태를 읽다 실패: {type(e).__name__}: {e}"
+        return out
+    out["can_play"] = not (out["not_homed"] or out["unsent_servos"] or out.get("far") or out.get("clip_big") or out["calib_dirty"]
+                           or (out["playback"] or {}).get("running"))
+    return out
+
+
+def _rl_play_real(b):
+    """강화학습 시뮬 궤적을 실물 팔로 재생한다 — 역기구학 실물 재생(direct_api.play_real)과 같은 안전 경로에 RL 전용 거절을 앞에 더한 것.
+    열린 고리: 시뮬 관절 궤적을 그대로 따라갈 뿐 실물 관측(큐브 위치·관절 피드백)으로 정책을 다시 돌리지 않는다."""
+    import rl_run
+    from arm_control.play import check_trajectory
+    if mode_kind() != "direct":
+        return {"ok": False, "error": "실물(직접 CAN) 모드에서만 재생 (가상·ROS 모드는 안 됨)"}
+    if not direct_api.DIRECT.connected():
+        return {"ok": False, "error": "팔 연결 안 됨 (직접 CAN) — 연결 탭 ② 팔 연결"}
+    res = rl_run.get_run((b or {}).get("run_id"))
+    if not res:
+        return {"ok": False, "error": "화면에 보인 RL 결과를 서버에서 못 찾음 (서버를 다시 켰거나 오래됨) — 다시 돌린 뒤 재생"}
+    if not (b or {}).get("ack_table"):
+        return {"ok": False, "error": "책상 위치 확인이 필요함: 정책은 책상 앞 끝이 어깨에서 22.5 cm, 윗면이 어깨 아래 47.75 cm 인 장면에서 학습했다"}
+    sm = res.get("summary") or {}
+    if not sm.get("done"):
+        return {"ok": False, "error": f"시뮬에서 실패한 실행은 실물로 안 보냄 ({sm.get('fail_reason') or '끝내 못 마침'})"}
+    if sm.get("valid_spot") is False:
+        return {"ok": False, "error": "정책이 학습한 범위 밖 지점 — 실물로 안 보냄 (지도의 초록 칸 안에서)"}
+    arm = direct_api.DIRECT.arm
+    gen = arm.stop_gen          # 계획 사이 STOP 이 눌리면 play_trajectory 가 거절
+    try:
+        grip = rl_run.grip_params((b or {}).get("grip_gain"), (b or {}).get("grip_add_deg"))
+    except (TypeError, ValueError) as e:
+        return {"ok": False, "error": str(e)}
+    traj = rl_run.real_traj(res, grip=grip, limits=_rl_real_limits())   # 실물만 손가락을 더 쥐게 (rl_run.squeeze_grip)
+    big, small = _rl_clip_split(traj, arm.cal)
+    if big:
+        return {"ok": False, "error": "실물 보정 범위 밖이라 궤적이 잘림 → 재생 안 함 (force 로도 안 됨): " +
+                "; ".join(f"{n} {lo:.0f}..{hi:.0f}° (허용 {al[0]:.0f}..{al[1]:.0f}°)" for n, lo, hi, al, _ in big) +
+                " — 큐브 각도나 위치를 바꿔 다시"}
+    fatal, problems = check_trajectory(traj, arm.cal)
+    trivial = {n for n, *_ in small}      # 1° 이하로 잘리는 것은 경고로 안 올림 (0° 근처 부동소수점)
+    problems = [p for p in direct_api.drop_unverified(problems) if not any(p.startswith(n + " goes") for n in trivial)]
+    if fatal:
+        return {"ok": False, "error": f"재생 거절: {fatal}"}
+    if problems and not (b or {}).get("force"):
+        return {"ok": False, "need_force": True, "problems": problems,
+                "error": f"검사 {len(problems)}건 (--force 가 필요한 것): " + " / ".join(problems)}
+    try:
+        speed = float((b or {}).get("max_speed") or arm.p["max_speed"])
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "max_speed 가 숫자가 아님"}
+    if not 1.0 <= speed <= 90.0:
+        return {"ok": False, "error": "max_speed 는 1~90 °/s"}
+    r = arm.play_trajectory(traj, speed, stop_gen=gen)
+    if r.get("ok"):
+        arm.play["run_id"] = str(b.get("run_id"))     # RL 탭 3D 가 이 실행의 몇 번째 프레임인지 따라가게
+        import run_record                              # 실행 기록 (역기구학 실물 재생과 같게 logs/runs/ 에)
+        run_record.REC.on_play(traj, dict(res.get("params") or {}, max_speed=speed, run_id=str(b.get("run_id"))), arm=arm,
+                               extra={"force": bool(b.get("force")), "problems": problems, "speed": speed, "planner": "rl",
+                                      "grip_gain": grip[0], "grip_add_deg": grip[1]})
+    if r.get("ok") and problems:
+        r["msg"] = (r.get("msg") or "재생 시작") + f" (검사 {len(problems)}건 무시하고 재생: force)"
+    return r
+
+
+@app.post("/api/rl/play_real")
+async def api_rl_play_real(req: Request):
+    return JSONResponse(await asyncio.to_thread(_rl_play_real, await _body(req)))
+
+
 @app.get("/api/state")
 def api_state():
     return state()
@@ -456,15 +626,18 @@ async def _same_origin_post(request, call_next):
 
 async def _body(req):
     try:
-        return await req.json()
+        j = await req.json()
     except Exception:
         return {}
+    return j if isinstance(j, dict) else {}   # "문자열"·[]·null 본문이 와도 핸들러의 .get 이 500 으로 죽지 않게 (2026-11-24 fuzz: go_home·rl/play_real)
 
 
 @app.post("/api/svc/{sid}/{action}")
 async def api_svc(sid: str, action: str, req: Request):
     b = await _body(req)
     params = b.get("params") or {}
+    if not isinstance(params, dict):   # {"params": "cube_x"} 같은 본문이 500 으로 죽지 않게 (2026-11-25 검토)
+        params = {}
     if action == "start":
         r = pm.start(sid, params)
     elif action == "stop":
@@ -564,6 +737,8 @@ def _hand_ik(b, op):
     cur = {k: v["deg"] for k, v in actual_pose(backend().snapshot(), cal).items()}
     if op == "fk":
         js = b.get("joints") if isinstance(b.get("joints"), dict) else cur
+        # 유한한 숫자만 (1e400 = inf 가 오면 FK 가 nan 을 돌려주고 JSON 응답 만들다 500 으로 죽었다)
+        js = {str(k): float(v) for k, v in js.items() if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
         return hand_ik.fk(_ik_dir(), js, b.get("mode") or "auto") | {"joints_used": js}
     return hand_ik.solve(_ik_dir(), b, ranges, cur)
 
@@ -796,10 +971,7 @@ async def api_go_home(req: Request):
 
 direct_api.install(app, mode_kind, pm, can_state, _trajectory, str(LOG_DIR / "direct.log"))
 
-# --- 강화학습 탭 (rl_api.py: 팀원 정책을 MuJoCo 로 돌려보기. 팔에는 '실물로 재생'·'가상 팔로 재생' 버튼에서만) ---
-import rl_api   # noqa: E402
-rl_api.install(app, _ik_dir, arm={"mode": mode_kind, "play_virtual": _play_virtual})   # 팔 재생: direct_api.play_real / _play_virtual 그대로
-# --- 강화학습 탭 끝 ---
+# 강화학습 탭은 위의 /api/rl/* (rl_run.py·rl_worker.py, 우리 것). 팀 rl_api.py·rl_runner.py 는 안 씀 (2026-11-24 사용자)
 # 휴대폰 카메라 탭 (사진 → 큐브 자리, ArUco): 전부 phone_api.py / phone_detect.py / static/phone.js. 팔은 거기서 안 움직인다
 import phone_api   # noqa: E402
 phone_api.install(app, LOG_DIR, mode_kind)
@@ -809,8 +981,8 @@ import run_record   # noqa: E402  실물 재생마다 logs/runs/<시각>_<kind>/
 run_record.install(app, LOG_DIR,
                    lambda: (VM["arm"], True) if MODE["virtual"] else (direct_api.DIRECT.arm if direct_api.DIRECT.connected() else None, False),
                    mode_kind, lambda: can_state.get("text"))
-import stack_api   # noqa: E402  탑 쌓기 탭 (사진 → 큐브 여러 개 → 한 큐브씩 계획): stack_api.py / static/stack.js. 팔은 거기서 안 움직인다
-stack_api.install(app, LOG_DIR)
+# 탑 쌓기 탭 (stack_api.py / static/stack.js) 은 2026-11-25 없앰 (사용자) — 등록하지 않는다. 다시 쓰려면 아래 두 줄과 index.html 의 탭·스크립트를 되살린다.
+# import stack_api; stack_api.install(app, LOG_DIR)
 
 _MESH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,80}\.obj")
 

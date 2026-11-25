@@ -47,7 +47,7 @@ import phone_detect as PD   # noqa: E402
 CUBE_IDS = PD.CUBE_IDS   # 큐브 = 4x4 ID 0~4 (phone_detect 한 곳)
 STACK_R = 0.03           # 가상 장면: 이 안(m)이면 같은 자리 (그 위에 쌓임)
 JITTER_M, JITTER_DEG = 0.01, 5.0
-TD_DEFAULT = 0.4775
+TD_DEFAULT = 0.5575     # = hand_ik.TABLE_D_DEFAULT (실물 책상, 2026-11-25 프로파일을 8 cm 내림)
 TD_MATCH_M = 0.0005      # 계산에 쓴 d 가 화면의 d 와 이보다 다르면 그 결과를 안 준다
 
 
@@ -58,11 +58,74 @@ def fold(deg):
 def left_panel(img):
     """inference.png = [객체 그림 (렌즈 하나) | (bbox 그림) | 뎁스 색 그림 + 눈금 70 px] 가로로 붙인 것 → 첫 칸만 (ArUco 는 가운데를 주점으로 본다)."""
     h, w = img.shape[:2]
-    for n in (2, 3):
+    for n in (3, 2):     # 3 먼저 (2026-11-25 검토: --yolo both 의 3칸 1990 px 를 2칸으로 보면 960/480 = 2.0 이 통과해 1.5칸을 잘랐다)
         lw = (w - 70) / n
         if lw == int(lw) and 1.0 <= lw / h <= 2.0:
             return img[:, :int(lw)]
     return img
+
+
+LIVE_MAX_LEVELS = 1     # 큐브 층 후보 수 (phone_detect max_levels). 2026-11-25 탑 쌓기를 없애 1 = 늘 책상 위 — 기준 종이 없이 층을 고르면
+                        # 큐브마다 마커 크기 오차로 한 층 틀렸다. 탑 쌓기를 되살리면 phone_detect.MAX_LEVELS 로
+_UNRECT = {"key": None, "maps": None, "why": None}
+
+
+def unrectify(img, calib_path):
+    """inference.png 의 왼쪽 칸 = 폰 프로그램이 '정류한' 왼쪽 렌즈 그림 (lib_rectify: stereoRectify, CALIB_ZERO_DISPARITY, alpha 0 —
+    초점 P1 ≈ 461 px, 광축 약 4° 돌림, 왜곡 없음). 큐브 인식은 원래 렌즈 보정 (K1 ≈ 312 px · dist1) 과 거치 자세를 쓰므로
+    정류 전 모습으로 되돌린다 (2026-11-25: 되돌리지 않아 큐브 마커 40 mm 가 51 mm 로 재지고 층이 3 으로, 뎁스와 9 cm 어긋났다).
+    (그림, None) 또는 못 하면 (그대로, 이유). 맵은 보정 파일·크기마다 한 번 만든다."""
+    import cv2
+    import numpy as np
+    try:
+        st = os.stat(calib_path)
+    except OSError:
+        return img, f"보정 파일 없음 ({calib_path})"
+    key = (str(calib_path), st.st_mtime_ns, img.shape[:2])
+    if _UNRECT["key"] != key:
+        maps, why = None, None
+        try:
+            with open(calib_path) as f:
+                c = json.load(f)
+            w, h = (int(v) for v in c["image_size"])
+            if (img.shape[1], img.shape[0]) != (w, h):
+                why = f"그림 {img.shape[1]}×{img.shape[0]} 이 보정 크기 {w}×{h} 와 다름 (폰 프로그램 --scale?)"
+            else:
+                K1, d1, K2, d2 = (np.asarray(c[k], np.float64) for k in ("K1", "dist1", "K2", "dist2"))
+                R1, _, P1, _, _, _, _ = cv2.stereoRectify(K1, d1, K2, d2, (w, h), np.asarray(c["R"], np.float64),
+                                                          np.asarray(c["T"], np.float64).reshape(3, 1),
+                                                          flags=cv2.CALIB_ZERO_DISPARITY, alpha=0.0)
+                u, v = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+                q = cv2.undistortPoints(np.stack([u, v], -1).reshape(-1, 1, 2), K1, d1, R=R1, P=P1).reshape(h, w, 2)
+                maps = (q[..., 0].astype(np.float32), q[..., 1].astype(np.float32))
+        except (OSError, ValueError, KeyError, TypeError, cv2.error) as e:
+            why = f"정류 되돌리기 실패: {e}"
+        _UNRECT.update(key=key, maps=maps, why=why)
+    if _UNRECT["maps"] is None:
+        return img, _UNRECT["why"]
+    return cv2.remap(img, *_UNRECT["maps"], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT), None
+
+
+def pipeline_calib(dcfg):
+    """폰 프로그램이 정류에 쓴 보정 파일: 대시보드가 켰으면 그때 고른 파일 (Pipeline.calib_file), 아니면 지금 폰 모델로 고른 파일.
+    (프레임마다 adb 로 모델을 묻지 않게, 그리고 adb 가 끊겨도 같은 파일로 되돌리게 — 2026-11-25 검토)"""
+    import phone_api
+    f = getattr(phone_api.PIPE, "calib_file", None) if phone_api.PIPE is not None else None
+    return Path(dcfg["repo_dir"]) / (f or phone_api.calib_choice(dcfg)["file"])
+
+
+def flip_panels(img):
+    """화면용: inference.png 의 그림 칸마다 180° 돌린다 (폰이 거치대에 거꾸로 끼워져 위아래가 뒤집혀 보임, 2026-11-24 사용자).
+    오른쪽 70 px 뎁스 눈금도 따로 돌린다 — 폰 프로그램이 --text-rot180 으로 글자를 미리 거꾸로 써 두어 돌리면 바로 읽힌다 (2026-11-25).
+    칸 모양을 모르면 통째로 돌린다. 인식(ArUco·뎁스)은 원본 그림을 쓴다."""
+    import numpy as np
+    h, w = img.shape[:2]
+    for n in (3, 2):
+        lw = (w - 70) / n
+        if lw == int(lw) and 1.0 <= lw / h <= 2.0:
+            lw = int(lw)
+            return np.hstack([img[:, i * lw:(i + 1) * lw][::-1, ::-1] for i in range(n)] + [img[:, n * lw:][::-1, ::-1]])
+    return img[::-1, ::-1]
 
 
 # ---------------------------------------------------------------- 가상 장면
@@ -208,6 +271,8 @@ class Live:
         self.n = 0
         self.thread = None
         self.inject = None         # 시험: (BGR 배열, 프레임 시각) — 파일 대신
+        self.unrect_why = None     # inference.png 정류 되돌리기를 못 한 이유 (unrectify)
+        self.imu_fix_deg = None    # 이번 프레임에 중력 센서로 고친 기울기 (°), 못 고쳤으면 None
 
     def start(self):
         if self.thread is None:
@@ -256,7 +321,9 @@ class Live:
             self.key = key
             if name == "live.jpg":   # 화면 스트림은 인식(ArUco·뎁스)을 기다리지 않고 받은 그대로 바로 (들쭉날쭉 줄임, 2026-11-24)
                 self.raw_jpeg, self.raw_t = raw, time.time()
-            return (left_panel(img) if name == "inference.png" else img), st.st_mtime, name
+            if name == "inference.png":   # 왼쪽 칸 = 정류된 그림 → 원래 렌즈 모습으로 (unrectify), 못 하면 그대로 + 이유
+                img, self.unrect_why = unrectify(left_panel(img), pipeline_calib(dcfg))
+            return img, st.st_mtime, name
         return None
 
     def _step(self):
@@ -278,18 +345,24 @@ class Live:
         import phone_detect as PD
         import phone_fuse as PF
         td = self.td
-        # 기준 종이가 안 보이면 CAD 거치 자세 + 폰 보정값 + 책상 높이 (화면의 d 칸) 로 큐브 자리 (phone_detect)
+        c2r, self.imu_fix_deg = phone_api.live_c2r(dcfg)      # 기울기 = 이 프레임의 폰 중력 센서 (저장 안 함)
+        dcfg = {**dcfg, "camera_to_robot": c2r, "_imu_tilt": self.imu_fix_deg is not None}
+        # 기준 종이가 안 보이면 거치 자세 (기울기는 중력 센서) + 폰 보정값 + 책상 높이 (화면의 d 칸) 로 큐브 자리 (phone_detect)
         cam_cfg = {**phone_api._load(self.log_dir / "phone_cam.json"), "intr": phone_api.intrinsics(dcfg), "td": td,
-                   "image_rot_q": phone_api.image_rot_q(dcfg)}
+                   "image_rot_q": phone_api.image_rot_q(dcfg), "c2r": dcfg.get("camera_to_robot"),
+                   "max_levels": LIVE_MAX_LEVELS}
         now = time.monotonic()
-        dep = DP.evaluate(dcfg, td, time.time(), self.prev["pos"] if now - self.prev["t"] <= 3.0 else None)
+        multi = PD.detect_cubes(img, cam_cfg)          # 큐브 여러 개 (4x4 ID 0~4, 층, 기울기)
+        # 뎁스 후보가 여럿이면 휴대폰 탭이 집을 큐브 (ArUco ID 0, 없으면 처음 본 큐브) 쪽을 고르게 (2026-11-25 '헷갈림' 고침)
+        aru = [c for c in multi.get("cubes", []) if c.get("id") == PD.CUBE_ID] or list(multi.get("cubes", []))[:1]
+        prefer = (aru[0]["x"], aru[0]["y"]) if aru else None
+        dep = DP.evaluate(dcfg, td, time.time(), self.prev["pos"] if now - self.prev["t"] <= 3.0 else None, prefer=prefer)
         if dep.get("ok"):
             self.prev.update(pos=dep.pop("pos"), t=now)
         fused = PF.find(img, cam_cfg, dep)            # 휴대폰 탭: 큐브 하나 (4x4 ID 0 + 뎁스)
         if fused.get("aruco") is not None:
             for k in ("annotated", "cfg"):
                 fused["aruco"].pop(k, None)
-        multi = PD.detect_cubes(img, cam_cfg)          # 큐브 여러 개 (4x4 ID 0~4, 층, 기울기)
         vis = multi.pop("annotated", None)
         multi.pop("cfg", None)
         cubes = []
@@ -324,14 +397,14 @@ class Live:
 
     def stale_s(self):
         """기다릴 한계: live.jpg 면 STALE_S, inference.png 면 그 저장 간격의 1.6 배 (STALE_S ~ STALE_MAX_S)."""
-        a = [t for t, s in self.arrivals if s == "inference.png"]
+        a = [t for t, s in list(self.arrivals) if s == "inference.png"]   # list() = 한 번에 복사 (프레임 스레드가 붙이는 중이어도)
         if len(a) < 3 or self.res is None or self.res.get("src") != "inference.png":
             return STALE_S
         gaps = sorted(b - a_ for a_, b in zip(a, a[1:]))
         return min(STALE_MAX_S, max(STALE_S, 1.6 * gaps[len(gaps) // 2]))
 
     def rate(self):
-        a = [t for t, _ in self.arrivals]
+        a = [t for t, _ in list(self.arrivals)]
         return round((len(a) - 1) / (a[-1] - a[0]), 1) if len(a) >= 3 and a[-1] > a[0] else None
 
 
@@ -429,6 +502,9 @@ def cubes(td=None, pick_id=None):
     else:
         out.update(cubes=[{**c, "age_s": round(age, 2)} for c in res["cubes"]], refs=res["refs"], warn=res["warn"], reason=res["reason"],
                    level_unsure=res["level_unsure"], depth_age_s=res.get("depth_age_s"))
+        if res.get("src") == "inference.png" and LIVE.unrect_why:   # 정류 되돌리기 실패 → 마커 크기·층·자리가 틀린다 (조용히 넘기지 않음)
+            out["warn"] = list(out["warn"]) + [f"그림 정류 되돌리기 못 함 ({LIVE.unrect_why}) — 큐브 마커 크기·층·자리가 틀릴 수 있다"]
+            out["level_unsure"] = True
     if mismatch:
         out["pick"] = {"ok": False, "stale": False, "warn": [], "note": [], "sources": [], "reason": out["reason"]}
         return out
@@ -484,8 +560,9 @@ def install(app, log_dir, mode):
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"cache-control": "no-store"})
 
     @app.get("/api/live/inference.png")
-    def _inference():
-        """폰 프로그램이 저장한 뎁스·세그 결과 그림 (inference.png: 객체 세그 + 뎁스 색) — 화면에 원본 영상 아래 같이 보인다 (2026-11-24 사용자)."""
+    def _inference(flip: int = 0):
+        """폰 프로그램이 저장한 뎁스·세그 결과 그림 (inference.png: 객체 세그 + 뎁스 색) — 화면에 원본 영상 아래 같이 보인다 (2026-11-24 사용자).
+        ?flip=1 이면 그림 칸마다 180° 돌려 보낸다 (flip_panels)."""
         if LIVE.mode() == "virtual":
             return Response(status_code=404)
         try:
@@ -495,7 +572,23 @@ def install(app, log_dir, mode):
         if not os.path.isfile(path):
             return Response(status_code=404)
         with open(path, "rb") as f:
-            return Response(f.read(), media_type="image/png", headers={"cache-control": "no-store"})
+            raw = f.read()
+        if not raw.rstrip(b"\0").endswith(b"IEND\xaeB`\x82"):   # 폰 프로그램이 쓰는 도중의 반쪽 파일 — 디코드하지 않고(libpng 경고 방지) 직전 완성본을 보낸다
+            last = getattr(_inference, "last", {}).get(bool(flip))
+            if last:
+                return Response(last[1], media_type=last[0], headers={"cache-control": "no-store"})
+            return Response(status_code=404)
+        if flip:
+            import cv2
+            import numpy as np
+            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            if img is not None:      # 쓰는 도중의 반쪽 파일이면 그대로 보낸다 (브라우저가 이전 그림을 둔다)
+                ok, buf = cv2.imencode(".jpg", flip_panels(img), [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    _inference.__dict__.setdefault("last", {})[True] = ("image/jpeg", buf.tobytes())
+                    return Response(buf.tobytes(), media_type="image/jpeg", headers={"cache-control": "no-store"})
+        _inference.__dict__.setdefault("last", {})[bool(flip)] = ("image/png", raw)
+        return Response(raw, media_type="image/png", headers={"cache-control": "no-store"})
 
     @app.post("/api/live/scene")
     async def _scene(req: Request):
@@ -503,6 +596,8 @@ def install(app, log_dir, mode):
             return JSONResponse({"ok": False, "error": "가상 모드에서만 (실물은 카메라가 본 큐브)"})
         try:
             b = await req.json()
+            if not isinstance(b, dict):          # [] · null · "str" 도 400 으로 (전엔 b.get 에서 500)
+                raise TypeError("body is not an object")
             return JSONResponse(SCENE.op(b))
         except (KeyError, TypeError, ValueError):
             return JSONResponse({"ok": False, "error": "값이 틀림"}, status_code=400)

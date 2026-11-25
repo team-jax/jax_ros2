@@ -80,12 +80,23 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
         el("div", { class: "ph-row" }, PH.bPipe), PH.pipeNote,
         el("label", { class: "help", style: "display:flex;gap:8px;align-items:center;margin:14px 0 0" }, PH.df.save_rgbd = el("input", { type: "checkbox" }),
           "뎁스 맵 저장 (책상 높이를 뎁스로도 재려면 — 저장한 뒤 폰 프로그램을 껐다 켜기)"),
+        // 2026-11-25: 자로 잴 것 없는 자동 보정 — 폰 중력 센서로 기울기, 큐브 윗면 마커(40 mm)로 책상 높이 d (phone_api.autocal)
+        el("div", { class: "ph-row" }, PH.bCal = el("button", { class: "btn", onclick: phAutocal }, "자동 보정 (중력 센서 + 큐브 마커 · 자 필요 없음)")),
+        PH.calNote = el("div", { class: "result", hidden: true }),
+        // 2026-11-25 사용자: 카메라로 집으면 약 3 cm 앞으로 감 → 찾은 큐브 자리를 고친다 (ArUco·뎁스 둘 다, 기본 y +3 cm)
+        el("div", { class: "frow" }, el("b", {}, "자리 고침"), dfld("fx", "x (+ = 로봇 왼쪽)", "cm"), dfld("fy", "y (+ = 로봇 쪽 = 뒤)", "cm")),
+        el("div", { class: "help", style: "margin:4px 0 0" }, "카메라로 집을 때 손이 큐브보다 앞으로 가면 y 를 + 로 (그만큼 로봇 쪽으로), 왼쪽으로 치우치면 x 를 − 로. 저장하면 바로 다음 프레임부터."),
         el("div", { class: "frow" }, el("b", {}, "거치 자세"), dfld("c0", "tx", "m"), dfld("c1", "ty", "m"), dfld("c2", "tz", "m"), dfld("c3", "roll", "°"), dfld("c4", "pitch", "°"), dfld("c5", "yaw", "°")),
         el("div", { class: "help", style: "margin:8px 0 0" }, "카메라 좌표 → 로봇 좌표 (팀 vision_node 의 camera_to_robot 과 같은 숫자 6개). 처음 값은 CAD 임시값이라 실물에서 보정해야 한다: ",
           "큐브를 아는 자리 3곳 이상에 놓고 결과 줄의 '카메라 좌표' 를 적어 dashboard/tools/solve_phone_mount.py 로 푼다 (README)."),
         el("div", { class: "frow" }, el("b", {}, "큐브 각"), dfld("yaw", "직접 넣기", "° (비우면 추정)")),
         el("div", { class: "help", style: "margin:8px 0 0" }, "뎁스만으로 찾을 때 쓰는 각. 추정한 각은 보이는 면의 방향에서 구한 근삿값이다 (작은 큐브에서는 10° 안팎 틀릴 수 있다). 큐브는 90° 마다 같아서 −45~45° 로만 나온다. ArUco 가 같이 있으면 ArUco 각을 쓴다."),
         el("div", { class: "frow" }, dfld("repo_dir", "폰 스테레오 저장소", "폴더", true), dfld("run_dir", "결과 폴더", "(비우면 저장소/phone_stereo/runs/dash)", true)),
+        // 2026-11-25 사용자: USB 가 불안정 → 핫스팟·Tailscale 로 1 초에 한 장. 비우면 USB(adb), auto = PC 를 폰 핫스팟에 붙였을 때 (기본 게이트웨이 = 폰)
+        el("div", { class: "frow" }, dfld("wifi_host", "Wi-Fi 로 받기 (폰 IP)", "비우면 USB · auto = 폰 핫스팟 · Tailscale 은 100.x IP", true), dfld("send_fps", "Wi-Fi 장/초", "기본 1")),
+        el("div", { class: "help", style: "margin:6px 0 0" }, "Wi-Fi: PC 를 폰 핫스팟(또는 같은 Tailscale)에 붙이고, 처음 한 번은 USB 를 꽂은 채 '폰 프로그램 켜기' — 앱이 설정을 기억해서 다음부터는 케이블 없이 폰에서 Phone Stereo 앱만 열면 된다. 앱 화면에 폰 주소가 나온다."),
+        el("label", { class: "help", style: "display:flex;gap:8px;align-items:center;margin:8px 0 0" }, PH.df.text_rot180 = el("input", { type: "checkbox" }),
+          "결과 그림 글자를 거꾸로 써 두기 (폰이 거꾸로 끼워져 화면에서 그림을 뒤집어 볼 때 글자가 바로 읽힘 — 바꾸면 폰 프로그램을 껐다 켜기)"),
         el("div", { class: "ph-row" }, el("button", { class: "btn line", onclick: phSaveDepthCfg }, "폰 뎁스 설정 저장")),
         el("div", { class: "help", style: "margin:10px 0 0" }, "터미널에서 직접 켤 때:"), PH.cmd)));
   fetch("/api/phone/config").then((r) => r.json()).then((d) => { for (const k in PH.f) PH.f[k].value = d.cfg[k]; }).catch(() => {});
@@ -128,6 +139,8 @@ function phLive(all) {
     : "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다 (기준 종이는 없어도 된다 — 없으면 거치 자세와 책상 높이로). 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.";
   if (virt) {
     PH.img.hidden = true;
+    if (PH.imgSrc) { PH.imgSrc = ""; streamSet(PH.img, false); }   // 숨긴 MJPEG 스트림 닫기 (2026-11-25 검토)
+    if (PH.inf) PH.inf.hidden = PH.infFlipRow.hidden = true;
     if (!r.ok) { PH.cube = null; PH.grasp = null; PH.block = ""; PH.last = null; PH.grasp_el.hidden = true; phShow(PH.res, "가상 큐브 없음", "", r.reason || ""); return; }
     PH.last = r; PH.block = r.blocked ? r.block : "";
     phShow(PH.res, el("span", {}, el("span", { class: "ph-xy" }, `큐브  x ${r.cube.x.toFixed(3)}  y ${r.cube.y.toFixed(3)} m  yaw ${r.cube.yaw_deg.toFixed(0)}°`), el("b", { class: "ph-src" }, r.text)),
@@ -149,10 +162,20 @@ function phLive(all) {
   PH.img.hidden = !src;
   if (PH.imgSrc !== src) { PH.imgSrc = src; streamSet(PH.img, !!src); }
   // 뎁스·세그 결과 (폰 프로그램의 inference.png: 객체 세그 + 뎁스 색) — 원본 영상 아래 (2026-11-24 사용자)
-  if (!PH.inf) { PH.inf = el("img", { class: "ph-img", alt: "뎁스·세그", title: "폰 프로그램의 뎁스·세그 결과 (1초쯤마다)" }); PH.img.after(PH.inf); }
-  PH.inf.hidden = !src;
+  if (!PH.inf) {
+    PH.inf = el("img", { class: "ph-img", alt: "뎁스·세그", title: "폰 프로그램의 뎁스·세그 결과 (1초쯤마다)" });
+    // 폰이 거치대에 거꾸로 끼워져 위아래가 뒤집혀 보임 → 기본으로 칸마다 180° 돌려 보인다 (화면만; 인식은 원본). 브라우저마다 기억
+    let flip = true;
+    try { flip = localStorage.getItem("ph-inf-flip2") !== "0"; } catch (e) { /* 저장소 막힘 → 기본 */ }
+    PH.infFlip = el("input", { type: "checkbox" });
+    PH.infFlip.checked = flip;
+    PH.infFlip.onchange = () => { try { localStorage.setItem("ph-inf-flip2", PH.infFlip.checked ? "1" : "0"); } catch (e) { /* 무시 */ } PH.infT = 0; };
+    PH.infFlipRow = el("label", { class: "help", style: "display:flex;gap:6px;align-items:center;margin-top:6px" }, PH.infFlip, "뎁스·세그 그림 위아래 뒤집어 보기 (폰이 거꾸로 끼워짐 — 폰 프로그램이 글자를 미리 거꾸로 써서 뒤집으면 바로 읽힘)");
+    PH.img.after(PH.inf, PH.infFlipRow);
+  }
+  PH.inf.hidden = PH.infFlipRow.hidden = !src;
   const now = Date.now();
-  if (src && (!PH.infT || now - PH.infT > 1000)) { PH.infT = now; PH.inf.src = "/api/live/inference.png?t=" + now; }
+  if (src && (!PH.infT || now - PH.infT > 1000)) { PH.infT = now; PH.inf.src = "/api/live/inference.png?t=" + now + (PH.infFlip.checked ? "&flip=1" : ""); }
   const tail = (r.note || []).concat(r.warn || []).join(" · ");
   if (!r.ok) {
     PH.cube = null; PH.grasp = null; PH.block = ""; PH.last = null; PH.grasp_el.hidden = true;
@@ -168,6 +191,12 @@ function phLive(all) {
   PH.last = r; PH.block = r.blocked ? r.block : "";
   phShow(PH.res, el("span", {}, el("span", { class: "ph-xy" }, `큐브  x ${r.cube.x.toFixed(3)}  y ${r.cube.y.toFixed(3)} m  yaw ${r.cube.yaw_deg.toFixed(0)}°`), el("b", { class: "ph-src" }, r.text)),
     r.blocked ? "bad" : (r.warn || []).length ? "warn" : "", det.join(" · "));
+  // 책상 높이·거치 자세가 안 맞아 막혔으면 그 자리에서 자동 보정 (2026-11-25: 설정 카드 안에 묻혀 있어 못 찾았다)
+  const misfit = r.blocked && ((p && (p.height_cm < -2 || p.height_cm > 8)) || /안 맞음/.test(r.text || ""));
+  if (misfit) {
+    if (!PH.resCal) PH.resCal = el("button", { class: "btn small", style: "margin-top:8px", onclick: phAutocal }, "자동 보정 — 책상 높이·카메라 기울기 재서 맞추기 (자 필요 없음)");
+    PH.res.append(el("div", {}, PH.resCal));
+  }
   const c = PH.cube;   // 거의 같은 자리면 그대로 둔다 (1초마다 집을 수 있는지 다시 묻지 않게)
   if (!c || Math.hypot(c.x - r.cube.x, c.y - r.cube.y) > 0.003 || Math.abs(c.yaw_deg - r.cube.yaw_deg) > 2 || PH.d !== d) { PH.d = d; phGrasp(r.cube, " — 큐브를 옮기기"); }
 }
@@ -228,6 +257,31 @@ function phTableFill() {
   toast(`역기구학 탭 책상 높이 = ${f.value} m (어깨 축 아래)`);   // 큐브는 다음 phLive 가 새 높이로 다시 본다
 }
 
+// ---- 자동 보정: 기울기(중력 센서) + 책상 높이(큐브 마커) → 확인 → 폰 뎁스 설정 저장 + 역기구학 탭 d ----
+async function phAutocal() {
+  PH.bCal.disabled = true;
+  phShow(PH.calNote, "재는 중… (폰 프로그램 프레임 5장, 5초쯤)", "run", "큐브를 책상 위에 놓고 윗면 마커가 화면에 보이게, 폰·큐브를 건드리지 않는다");
+  try {
+    const r = await post("/api/phone/autocal", { apply: false }, true);
+    if (!r.ok) { phShow(PH.calNote, "자동 보정 못 함", "bad", r.reason || r.error || "?"); return; }
+    const ck = r.check || {}, gap = ck.gap && ck.gap.dpos_mm != null ? ` · ArUco·뎁스 차 ${(ck.gap.dpos_mm / 10).toFixed(1)} cm` : "";
+    const info = `책상 높이 d ${r.d} m (어깨 축 아래, 지금 칸 ${M.c && M.c.fields.d && M.c.fields.d.value || "0.5575(기본)"}) · 기울기 ${r.tilt_fix_deg}° 고침 ` +
+      `(roll ${r.c2r_old[3].toFixed(1)}→${r.c2r[3].toFixed(1)}°, pitch ${r.c2r_old[4].toFixed(1)}→${r.c2r[4].toFixed(1)}°) · 마커 ${r.n_markers}번 (${r.markers.join(", ")}) · 흔들림 ${r.spread_mm} mm` +
+      (ck.marker_mm != null ? ` · 고친 뒤 마커 ${ck.marker_mm} mm (원래 40)` : "") + gap + ((r.warn || []).length ? " · ⚠ " + r.warn.join(" · ") : "");
+    phShow(PH.calNote, "잰 값 (아직 저장 안 함)", r.warn && r.warn.length ? "warn" : "ok", info);
+    if (!confirm(`자동 보정 결과\n\n${info}\n\n거치 자세(기울기)를 폰 뎁스 설정에 저장하고, 역기구학 탭 책상 높이를 ${r.d} m 로 넣을까요?\n(카메라 자리 tx·ty·tz 와 yaw 는 CAD 그대로 — 중력으로는 못 잰다)`)) return;
+    const a = await post("/api/phone/autocal", { apply: true }, true);
+    if (!a.ok || !a.applied) { phShow(PH.calNote, "저장 못 함", "bad", a.reason || "?"); return; }
+    const f = M.c && M.c.fields.d;
+    if (f && a.in_range) { f.value = a.d.toFixed(3); f.dispatchEvent(new Event("input", { bubbles: true })); }
+    phShow(PH.calNote, "보정 저장함", "ok", `거치 자세 [${a.c2r.map((v) => (+v).toFixed(3)).join(", ")}] · 역기구학 탭 d = ${a.in_range ? a.d.toFixed(3) + " m" : "범위 밖이라 안 넣음"}`);
+    toast(`자동 보정 저장 — 책상 높이 ${a.d.toFixed(3)} m`);
+    await phLoadDepthCfg(); lvPoll();
+  } catch (e) {
+    phShow(PH.calNote, "자동 보정 실패", "bad", e.message);
+  } finally { PH.bCal.disabled = false; }
+}
+
 // ---- 폰 뎁스: 설정 · 폰 프로그램 켜기·끄기 · 상태 한 줄 ----
 async function phLoadDepthCfg() {
   try {
@@ -235,6 +289,8 @@ async function phLoadDepthCfg() {
     d.cfg.camera_to_robot.forEach((v, i) => { PH.df["c" + i].value = v; });
     PH.df.yaw.value = d.cfg.yaw_manual_deg ?? "";
     PH.df.repo_dir.value = d.cfg.repo_dir; PH.df.run_dir.value = d.cfg.run_dir; PH.df.save_rgbd.checked = !!d.cfg.save_rgbd;
+    const pf = d.cfg.pos_fix_m || [0, 0]; PH.df.fx.value = +(pf[0] * 100).toFixed(1); PH.df.fy.value = +(pf[1] * 100).toFixed(1);
+    PH.df.wifi_host.value = d.cfg.wifi_host || ""; PH.df.send_fps.value = d.cfg.send_fps ?? 1; PH.df.text_rot180.checked = d.cfg.text_rot180 !== false;
     PH.cmd.textContent = `cd ${d.cfg.repo_dir} && ${d.command}`;
     PH.missing = d.missing || [];
     if (d.calib) PH.calib.textContent = `보정 파일: ${d.calib.file} — 폰 모델로 고름 (${d.calib.note})`;
@@ -244,7 +300,9 @@ async function phLoadDepthCfg() {
 async function phSaveDepthCfg() {
   const c2r = [0, 1, 2, 3, 4, 5].map((i) => parseFloat(PH.df["c" + i].value));
   const yaw = PH.df.yaw.value.trim();
-  const r = await post("/api/phone/depth/config", { camera_to_robot: c2r, yaw_manual_deg: yaw === "" ? null : parseFloat(yaw), repo_dir: PH.df.repo_dir.value, run_dir: PH.df.run_dir.value, save_rgbd: PH.df.save_rgbd.checked });
+  const r = await post("/api/phone/depth/config", { camera_to_robot: c2r, yaw_manual_deg: yaw === "" ? null : parseFloat(yaw), repo_dir: PH.df.repo_dir.value, run_dir: PH.df.run_dir.value, save_rgbd: PH.df.save_rgbd.checked,
+    pos_fix_m: [(parseFloat(PH.df.fx.value) || 0) / 100, (parseFloat(PH.df.fy.value) || 0) / 100],
+    wifi_host: PH.df.wifi_host.value.trim(), send_fps: parseFloat(PH.df.send_fps.value) || 1, text_rot180: PH.df.text_rot180.checked });
   if (r.ok) { await phLoadDepthCfg(); lvPoll(); }
 }
 

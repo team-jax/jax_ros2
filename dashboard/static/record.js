@@ -15,7 +15,7 @@
   const chipEl = el("span", { class: "chip rec-chip", id: "chip-rec", title: "실행 기록 (연결 탭 맨 아래)" });
   const chips = document.querySelector(".topbar .chips");
   if (chips) chips.append(chipEl);
-  chipEl.addEventListener("click", () => { if (typeof showTab === "function") showTab("conn"); box.open = true; box.scrollIntoView({ behavior: "smooth" }); });
+  chipEl.addEventListener("click", () => { location.hash = "conn"; box.open = true; box.scrollIntoView({ behavior: "smooth" }); });
 
   const box = el("details", { class: "adv", id: "rec-box" }, el("summary", {}, "기록 — 실물 재생마다 영상·관절·인식·계획 저장"));
   const body = el("div", { class: "card" });

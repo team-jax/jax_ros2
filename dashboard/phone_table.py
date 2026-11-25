@@ -37,7 +37,7 @@ CAM_PITCH_DEG = 45.0                    # 아래로 기운 각 (CAD)
 _S = math.sqrt(0.5)
 R_OPT = ((0.0, _S, -_S), (1.0, 0.0, 0.0), (0.0, -_S, -_S))            # CAMERA.md 2.1: 광학 → 카메라 좌표 (정우 축)
 R_CAD = ((-1.0, 0.0, 0.0), (0.0, _S, -_S), (0.0, -_S, -_S))           # 광학 → 우리 로봇 좌표 = [[0,−1,0],[1,0,0],[0,0,1]] · R_OPT
-D_RANGE = (0.44, 0.53)                  # 계획이 받는 범위 (hand_ik.D_RANGE 와 같게 — phone_api 가 그쪽 값으로 덮어쓴다)
+D_RANGE = (0.44, 0.60)                  # 계획이 받는 범위 (hand_ik.D_RANGE 와 같게 — phone_api 가 그쪽 값으로 덮어쓴다)
 TILT_WARN_DEG = 2.0
 MIN_REFS = 3                            # 초점거리까지 맞추려면 마커 3개 이상
 DEPTH_MAX_AGE_S = 20.0                  # rgbd.npz 는 5초마다 저장된다
@@ -364,7 +364,7 @@ def pick_rot(np, poses, q_cfg=None):
     return None if r["q"] is None else (r["q"], r["ch"])
 
 
-def cad_camera(cv2, np, found, intr, w, h, td, ids, q_cfg=None):
+def cad_camera(cv2, np, found, intr, w, h, td, ids, q_cfg=None, c2r=None):
     """기준 종이 없이 큐브 위치를 구할 때 쓰는 카메라 (phone_detect 의 _cameras 와 같은 모양 (K, R 세상→카메라, 자리 C, 0.0)).
     세상 = 로봇 좌표를 책상 면이 z 0 이 되게 올린 것 (C z = 카메라의 책상 위 높이). found = {id: 사진 꼭짓점}.
     → {cam, und {id: 왜곡 푼 꼭짓점}, q, rot_src} 또는 None (보정값·책상 높이가 없음) 또는 {why} (보정값이 이 프레임 것이 아님 · 사진 회전을 못 가림)."""
@@ -381,7 +381,16 @@ def cad_camera(cv2, np, found, intr, w, h, td, ids, q_cfg=None):
     q = pr["q"]
     R = r_opt_robot(np, q).T
     C = np.array([CAM_POS[0], CAM_POS[1], CAM_POS[2] + float(td)])
-    return {"cam": (K, R, C, 0.0), "und": und, "q": q, "rot_src": pr["src"]}
+    src = pr["src"]
+    if c2r is not None and rot_from_c2r(c2r) == q:
+        # 폰 뎁스 설정의 거치 자세(camera_to_robot)를 그대로 — 뎁스와 같은 거치 자세를 쓴다 (2026-11-25: 예전엔 여기만 45° 딱 맞춘 CAD 회전·자리라
+        # 뎁스(45.1°)·실제(IMU 46.3°)와 달라 ArUco·뎁스가 몇 cm 어긋났다). 자동 보정(phone_api.autocal)이 이 값을 IMU 로 고친다.
+        import phone_depth as DP
+        Ro = np.array([DP.camera_to_robot(e, (0.0, 0.0, 0.0) + tuple(float(v) for v in c2r[3:6])) for e in np.eye(3)]).T
+        R = Ro.T
+        C = np.array([float(c2r[0]), float(c2r[1]), float(c2r[2]) + float(td)])
+        src = f"{src} · 거치 자세 = 폰 뎁스 설정"
+    return {"cam": (K, R, C, 0.0), "und": und, "q": q, "rot_src": src}
 
 
 def measure_cubes(image, intr, cube_h=None, q_cfg=None):

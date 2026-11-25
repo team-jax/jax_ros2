@@ -141,16 +141,22 @@ class ProcessManager:
             if outside:
                 return {"ok": False, "error": "대시보드 밖에서 이미 떠 있음: " +
                         ", ".join(f"{s['name']}(pid {s['pid']})" for s in outside)}
-            if params:
+            old = dict(it.params)    # 2026-11-25 검토: 거절된 값이 남아 다음 실행(가상 재생 속도 0 → 500)에 쓰였다 → 거절이면 되돌림
+            if isinstance(params, dict):
                 for k in it.params:
                     if k in params:
                         it.params[k] = str(params[k])
             if self.virtual is not None and it.svc.id in VIRTUAL_NODES:
+                try:     # 가상 노드도 실물과 같은 값 검사 (예전엔 건너뛰어 "abc" 는 500·반쯤 켜짐, "-30" 은 관절이 거꾸로 달아남)
+                    it.svc.build(dict(it.params, _local=True))
+                except ValueError as e:
+                    it.params, it.error = old, str(e)
+                    return {"ok": False, "error": str(e)}
                 return self._start_virtual(it)
             try:
                 body = it.svc.build(dict(it.params, _local=self.virtual is not None or not IS_LINUX or FORCE_LOCAL["on"]))
             except ValueError as e:
-                it.error = str(e)
+                it.params, it.error = old, str(e)
                 return {"ok": False, "error": str(e)}
             env = dict(os.environ, PYTHONUNBUFFERED="1", RCUTILS_COLORIZED_OUTPUT="0",
                        RCUTILS_LOGGING_BUFFERED_STREAM="0")

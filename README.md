@@ -105,3 +105,18 @@ AK45 피드백(0x29)에는 전압이 없어 전압 경고는 없다(robot_arm �
 
 팀 레포(team-jax/jax_ros2)의 구조 — `ak45_node`(C++, ak45_can) · `stm_bridge_node` · `arm_control_node` · `homing_guard` · `vision_node`, `arm.launch.py` / `arm_homed.launch.py`, 토픽 표, colcon 빌드, `calibrate --ros`, vcan 시험 — 은 **`ROS_TEAM.md`** 로 옮겼다(코드는 그대로).
 같은 대시보드를 ROS 노드로 쓰려면 `python3 dashboard/server.py --ros` (ROS 2 설치·`colcon build` 필요). 문서: `STATUS.md`, `NODES.md`.
+
+## ROS 시험 돌리는 법 (2026-11-24, 이 PC = Ubuntu 24.04 + ROS Jazzy 에서 확인)
+
+레포를 colcon 작업공간에 빌드·설치해야 `ros2 run vision_node …` 가 된다 (안 하면 vision_node 시험이 'published 0 messages' 로 전부 실패하는데 노드 문제가 아니다). 레포를 더럽히지 않게 임시 작업공간에 복사해서 빌드한다:
+
+```bash
+mkdir -p /tmp/ws/src/repo && for p in arm_control stm_bridge vision_node ak45_ros2 ak45_can; do rsync -a --exclude=__pycache__ $p /tmp/ws/src/repo/; done
+cd /tmp/ws && source /opt/ros/jazzy/setup.bash && colcon build            # 가상 CAN 스크립트가 <작업공간>/src/<레포>/arm_control/tests 구조를 기대한다
+source /tmp/ws/install/setup.bash && cd arm_control && python3 tests/check_node.py        # python3 -I 로 돌리면 PYTHONPATH 를 무시해 rclpy 를 못 찾는다
+```
+
+- 노드 시험: `arm_control/tests/check_node.py`·`check_calibrate_wait.py`, `stm_bridge/tests/check_node.py`, `vision_node/tests/check_node.py`·`check_camera_mode.py`.
+- 가상 CAN 시험(`check_topics.sh`·`launch_vcan.sh`·`chain_vcan.sh`·`calibrate_vcan.sh`): `sudo` 없이 `unshare -Urn`(개인 네트워크 네임스페이스)에서 자기 `can0`/`vcan0` 를 만든다 — 실물 can0 와 분리. 단 `ak45_node` 는 `/tmp/ak45_ctrl.lock` 이 잡혀 있으면(대시보드가 실물 팔에 연결 중) 시작을 거부한다 → 시험은 `unshare -Urnm` 으로 그 파일을 더미로 덮어씌워 돌린다 (실물 잠금은 그대로).
+- 기대값은 `calibration.json` 에서 읽는다 (서보 이름·핀·영점·범위를 사용자가 실물에서 고친다).
+- `arm_control/tests/check_split.py --original <team-jax/SimToReal 경로>` 는 외부 저장소가 필요해서 이 점검에서는 못 돌렸다.

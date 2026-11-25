@@ -54,6 +54,39 @@ _MODEL = {"t": 0.0, "v": None, "ok_t": 0.0, "last": None}
 LIMITS = {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "rot_deg": (-180.0, 180.0), "cube_h": (0.0, 0.3)}
 
 
+MODEL_FILE = HERE / "logs" / "phone_model.json"    # 마지막으로 adb 로 본 폰 모델 (Wi-Fi 로만 붙을 때 씀)
+
+
+def _saved_model():
+    try:
+        return json.loads(MODEL_FILE.read_text()).get("model") or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _wifi_on():
+    try:
+        return bool(DP.load_cfg(HERE / "logs" / "phone_depth.json").get("wifi_host"))
+    except Exception:
+        return False
+
+
+def wifi_host(cfg):
+    """(폰 IP, None) 또는 (None, 이유). cfg wifi_host: "auto" = 핫스팟 — PC 의 기본 게이트웨이가 폰 (ip route), 아니면 그 값 그대로."""
+    h = (cfg.get("wifi_host") or "").strip()
+    if h.lower() != "auto":
+        return h, None
+    try:
+        r = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True, timeout=3)
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if "via" in parts:
+                return parts[parts.index("via") + 1], None
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"기본 게이트웨이를 못 읽음 ({e})"
+    return None, "기본 게이트웨이가 없음 — PC 를 폰 핫스팟에 연결했나"
+
+
 def phone_model():
     """USB 로 붙은 폰의 모델 (adb getprop ro.product.model), 없거나 adb 가 안 되면 None. 5초 캐시."""
     if time.monotonic() - _MODEL["t"] < 5.0:
@@ -68,6 +101,13 @@ def phone_model():
     now = time.monotonic()
     if v is not None:
         _MODEL.update(ok_t=now, last=v)
+        if v != _saved_model():
+            try:
+                MODEL_FILE.write_text(json.dumps({"model": v}))
+            except OSError:
+                pass
+    elif _wifi_on():   # Wi-Fi 로만 붙으면 adb 가 없다 → 마지막으로 USB 로 본 모델 (보정 파일·초점거리 고르기에 씀)
+        v = _saved_model()
     elif _MODEL["last"] is not None and now - _MODEL["ok_t"] < MODEL_KEEP_S:
         v = _MODEL["last"]
     _MODEL.update(t=now, v=v)
@@ -177,6 +217,7 @@ class Pipeline:
         self.log = Path(log_dir) / "phone_depth.log"
         self.pid_file = Path(log_dir) / "phone_depth_pid.json"
         self.proc = None
+        self.calib_file = None      # 켤 때 고른 보정 파일 (start)
         self.lock = threading.Lock()
 
     @staticmethod
@@ -209,11 +250,20 @@ class Pipeline:
         except OSError:
             return False
 
+    @staticmethod
+    def flag_supported(cfg, flag):
+        try:
+            return flag in (Path(cfg["repo_dir"]) / "z_phone_stereo.py").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+
     def command(self, cfg, calib=None):
         repo = Path(cfg["repo_dir"])
         calib = calib or calib_choice(cfg)["file"]
         return ([str(repo / "venv_ffs" / "bin" / "python"), "z_phone_stereo.py", "--physical", "2", "5", "--calib-stereo", calib,
                  "--yolo", "seg", "--headless", "--out", DP.run_dir(cfg)] + (["--rgbd-viewer"] if cfg.get("save_rgbd") else [])
+                + (["--wifi", wifi_host(cfg)[0] or "?", "--send-fps", f"{float(cfg.get('send_fps') or 1.0):g}"] if cfg.get("wifi_host") else [])
+                + (["--text-rot180"] if cfg.get("text_rot180", True) and self.flag_supported(cfg, "--text-rot180") else [])
                 + (["--live-jpg", "10"] if self.live_jpg_supported(cfg) else []))
 
     def missing(self, cfg, calib=None):
@@ -222,13 +272,21 @@ class Pipeline:
         need = [(repo / "z_phone_stereo.py", "폰 스테레오 저장소 (git clone https://github.com/team-jax/SteroDepthSeg)"),
                 (repo / "venv_ffs" / "bin" / "python", "venv_ffs (그 저장소에서 bash tools/setup_ffs.sh)"),
                 (repo / calib, f"{calib} (이 폰의 두 렌즈 보정 파일)")]
-        return [f"{what} — {p} 없음" for p, what in need if not p.exists()]
+        miss = [f"{what} — {p} 없음" for p, what in need if not p.exists()]
+        if cfg.get("wifi_host"):
+            h, why = wifi_host(cfg)
+            if why:
+                miss.append(f"Wi-Fi: {why}")
+            elif not self.flag_supported(cfg, "--wifi"):
+                miss.append("Wi-Fi: 그 저장소의 z_phone_stereo.py 에 --wifi 가 없음 (새 판으로)")
+        return miss
 
     def start(self, cfg):
         with self.lock:
             if self.pid() is not None:
                 return {"ok": False, "error": "이미 켜져 있음"}
             calib = calib_choice(cfg)
+            self.calib_file = calib["file"]     # live_api.unrectify 가 같은 파일로 되돌린다
             miss = self.missing(cfg, calib["file"])
             if miss:
                 return {"ok": False, "error": "켤 수 없음: " + " / ".join(miss)}
@@ -276,6 +334,142 @@ class Pipeline:
             return []
 
 
+AUTOCAL_FRAMES = 5          # 자동 보정: 이만큼 새 프레임 (폰 프로그램이 1초쯤마다 저장)
+AUTOCAL_LEVEL_TOL = 0.02    # 가장 낮은 마커에서 이만큼(m) 안의 마커만 책상 위 큐브로 (쌓인 큐브는 뺀다)
+
+
+def _rot(np, rpy):
+    """camera_to_robot 의 회전 (광학 → 로봇) — phone_depth.camera_to_robot 과 같은 규약."""
+    return np.array([DP.camera_to_robot(e, (0.0, 0.0, 0.0) + tuple(float(v) for v in rpy)) for e in np.eye(3)]).T
+
+
+def _rpy(R):
+    """R = Rz(yaw)·Ry(pitch)·Rx(roll) → [roll, pitch, yaw] °."""
+    return [math.degrees(math.atan2(R[2, 1], R[2, 2])), math.degrees(math.asin(max(-1.0, min(1.0, -R[2, 0])))),
+            math.degrees(math.atan2(R[1, 0], R[0, 0]))]
+
+
+def tilt_fix(c2r, up):
+    """거치 자세 c2r [tx, ty, tz, roll, pitch, yaw] 의 기울기를 폰 중력 센서의 '위' (왼쪽 렌즈 틀 up_cam1) 에 맞춘 것 → (c2r, 고친 각 °).
+    지금 회전에서 가장 작게 돌려 맞춘다 — yaw 는 중력으로 못 재서 그대로, 자리 tx·ty·tz 도 그대로."""
+    import numpy as np
+    u = np.asarray(up, float)
+    n = float(np.linalg.norm(u))
+    if not (n > 0 and np.isfinite(u).all()):
+        return list(c2r), 0.0
+    u = u / n
+    R0 = _rot(np, c2r[3:6])
+    a, z = R0 @ u, np.array([0.0, 0.0, 1.0])
+    v, c = np.cross(a, z), float(a @ z)
+    sv = float(np.linalg.norm(v))
+    Vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    Q = np.eye(3) + Vx + Vx @ Vx * ((1 - c) / sv ** 2) if sv > 1e-9 else np.eye(3)
+    return [float(x) for x in c2r[:3]] + [round(x, 3) for x in _rpy(Q @ R0)], round(math.degrees(math.acos(max(-1.0, min(1.0, c)))), 2)
+
+
+IMU_TILT_MAX_DEG = 8.0     # 중력 센서로 고칠 기울기 상한 — 넘으면 폰이 거치대에 없거나 흔들리는 중 (그때는 저장된 거치 자세 그대로)
+
+
+def live_c2r(dcfg):
+    """실시간 인식에 쓸 거치 자세 (2026-11-25): 저장된 거치 자세의 기울기를 지금 프레임의 중력 센서로 맞춘다 (저장 안 함, 매 프레임).
+    → (c2r, 고친 각 ° 또는 None). 중력 값이 없거나 IMU_TILT_MAX_DEG 넘게 다르면 그대로 (None)."""
+    c2r = [float(v) for v in dcfg["camera_to_robot"]]
+    fx = dcfg.get("pos_fix_m") or [0.0, 0.0]     # 자리 고침 (카메라를 그만큼 옮긴 것 = 찾은 큐브가 그만큼 옮겨짐)
+    c2r[0] += float(fx[0])
+    c2r[1] += float(fx[1])
+    if dcfg.get("imu_tilt") is False:
+        return c2r, None
+    try:
+        r = json.loads(open(os.path.join(DP.run_dir(dcfg), "inference.json")).read())
+        up = (r.get("imu") or {}).get("up_cam1")
+    except (OSError, ValueError, AttributeError):
+        return c2r, None
+    if not up:
+        return c2r, None
+    new, deg = tilt_fix(c2r, up)
+    return (new, deg) if deg <= IMU_TILT_MAX_DEG else (c2r, None)
+
+
+def autocal(dcfg, cube_h=None, frames=AUTOCAL_FRAMES, timeout_s=15.0):
+    """자로 잴 것 없는 거치 자세·책상 높이 보정 (2026-11-25 사용자). 폰 프로그램이 매 프레임 내보내는 것만 쓴다:
+    ① 기울기: 폰 중력 센서 (inference.json imu.up_cam1 = 왼쪽 렌즈 틀의 '위') 로 거치 자세 회전의 기울기(roll·pitch)를 고친다 —
+       지금 회전에서 가장 작게 돌려 맞춤 (yaw 는 중력으로 못 재서 그대로).
+    ② 책상 높이 d: 큐브 윗면 마커 (40 mm 를 알고 있음) 를 solvePnP → 카메라에서 마커까지 중력 방향 높이 + 큐브 높이 + 카메라 자리 tz.
+       (확인: 2026-11-25 실측 마커 PnP 와 스테레오 뎁스 거리가 0.8 cm 안으로 같았다 — 폰 쪽 재기는 맞고 책상이 0.557 m 였다)
+    카메라 자리 tx·ty·tz 와 yaw 는 CAD 그대로. → {ok, c2r, d, tilt_fix_deg, n_frames, markers, below_m, check, warn} 또는 {ok False, reason}."""
+    import cv2
+    import numpy as np
+    import live_api as L
+    cube_h = float(PD.DEFAULT_CFG["cube_h"] if cube_h is None else cube_h)
+    run = DP.run_dir(dcfg)
+    calib_path = L.pipeline_calib(dcfg)
+    intr = PT.load_intrinsics(str(calib_path))
+    if intr is None:
+        return {"ok": False, "reason": f"폰 보정 파일을 못 읽음 ({calib_path})"}
+    K, dist = np.array(intr["K"], float), np.array(intr["dist"], float)
+    prm = cv2.aruco.DetectorParameters_create()
+    ups, belows, ids, last, seen, t0 = [], [], set(), None, set(), time.monotonic()
+    while len(ups) < frames and time.monotonic() - t0 < timeout_s:
+        try:
+            st = os.stat(os.path.join(run, "inference.json"))
+            key = (st.st_mtime_ns, st.st_size)
+            if key in seen or time.time() - st.st_mtime > 3.0:
+                time.sleep(0.2)
+                continue
+            r = json.loads(open(os.path.join(run, "inference.json")).read())
+            raw = open(os.path.join(run, "inference.png"), "rb").read()
+        except (OSError, ValueError):
+            time.sleep(0.2)
+            continue
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR) if raw.rstrip(b"\0").endswith(b"IEND\xaeB`\x82") else None
+        up = ((r.get("imu") or {}).get("up_cam1"))
+        if img is None or not up:
+            time.sleep(0.2)
+            continue
+        seen.add(key)
+        u = np.array(up, float)
+        u /= np.linalg.norm(u)
+        im, why = L.unrectify(L.left_panel(img), calib_path)
+        if why:
+            return {"ok": False, "reason": f"그림 정류 되돌리기 못 함 — {why}"}
+        _, cubes = PD.split_markers(cv2, np, cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), prm, set(), set(PD.CUBE_IDS))
+        und = {i: PT.undistort(cv2, np, c, K, dist) for i, c in cubes.items()}
+        b = [-(np.asarray(sols[0][1], float).ravel() @ u) for sols in PT.marker_poses(cv2, np, und, K, PD.CUBE_MARKER_MM / 1000.0).values()]
+        ups.append(u)
+        if b:
+            lo = max(b)                                         # 가장 낮은 마커 = 책상 위 큐브 (쌓인 큐브는 더 높다)
+            belows += [x for x in b if lo - x <= AUTOCAL_LEVEL_TOL]
+            ids |= set(cubes)
+        last = im
+    if len(ups) < 2:
+        return {"ok": False, "reason": "폰 프로그램의 새 프레임(중력 센서 포함)을 못 받음 — 폰 프로그램이 켜져 있나, IMU 가 오는가"}
+    if not belows:
+        return {"ok": False, "reason": "큐브 윗면 마커(4x4 ID 0~4)가 안 보임 — 큐브를 책상에 놓고 마커가 카메라에 보이게"}
+    u = np.mean(ups, axis=0)
+    c2r = [float(v) for v in dcfg["camera_to_robot"]]
+    c2r_new, fix = tilt_fix(c2r, u)
+    below = float(np.median(belows))
+    d = round(-c2r[2] + below + cube_h, 4)
+    out = {"ok": True, "c2r": c2r_new, "c2r_old": c2r, "d": d, "tilt_fix_deg": fix,
+           "n_frames": len(ups), "markers": sorted(ids), "n_markers": len(belows), "below_m": round(below, 4),
+           "spread_mm": round((max(belows) - min(belows)) * 1000, 1), "in_range": PT.D_RANGE[0] <= d <= PT.D_RANGE[1], "warn": []}
+    if out["spread_mm"] > 10:
+        out["warn"].append(f"마커 높이가 {out['spread_mm']} mm 흔들림 — 큐브가 기울었거나 움직였다")
+    if not out["in_range"]:
+        out["warn"].append(f"d {d} m 가 계획이 받는 범위 {PT.D_RANGE[0]:g} ~ {PT.D_RANGE[1]:g} m 밖")
+    try:   # 확인: 새 거치 자세·d 로 마지막 프레임의 ArUco·뎁스가 맞나
+        import phone_fuse as PF
+        cfg2 = {**dcfg, "camera_to_robot": c2r_new}
+        cam = {"intr": intr, "td": d, "image_rot_q": image_rot_q(cfg2), "c2r": c2r_new}
+        dep = DP.evaluate(cfg2, d, time.time(), None)
+        f = PF.find(last, cam, dep)
+        out["check"] = {"text": f.get("text"), "gap": f.get("check"), "aruco": (f.get("aruco") or {}).get("cube"),
+                        "marker_mm": (f.get("aruco") or {}).get("cube_marker_mm"), "depth": dep.get("cube"), "depth_height_cm": dep.get("height_cm")}
+    except Exception as e:
+        out["check"] = {"error": f"{type(e).__name__}: {e}"}
+    return out
+
+
 def install(app, log_dir, mode=lambda: "direct"):
     """mode() → 'direct'|'virtual'|'ros'. 가상 모드는 카메라를 안 쓴다 (책상 높이 재기 거절)."""
     _install_depth(app, log_dir)
@@ -312,6 +506,11 @@ def install(app, log_dir, mode=lambda: "direct"):
         try:
             dcfg = DP.load_cfg(Path(log_dir) / "phone_depth.json")
             frame = DP.read_frame(dcfg, time.time())[0]
+            if frame is not None:   # inference.png 통째(정류된 왼쪽 칸 + 뎁스 칸) → 왼쪽 칸을 원래 렌즈 모습으로 (2026-11-25 검토: 통째로 재서 틀렸다)
+                import live_api
+                frame, why = live_api.unrectify(live_api.left_panel(frame), live_api.pipeline_calib(dcfg))
+                if why:
+                    return JSONResponse({"ok": False, "reason": f"폰 그림 정류 되돌리기 못 함 — {why}"})
             r = await asyncio.to_thread(_table_height, frame, dcfg, _load(cfg_file), d_now)
             if r.get("ok"):
                 LAST_TABLE["r"] = {"d": r.get("d"), "source": r.get("source"), "in_range": r.get("in_range"), "fill_ok": r.get("fill_ok"), "t": time.time()}
@@ -391,6 +590,31 @@ def _install_depth(app, log_dir):
         cfg_file.write_text(json.dumps(saved, ensure_ascii=False, indent=1))
         prev["pos"] = None
         return JSONResponse({"ok": True, "cfg": DP.load_cfg(cfg_file), "msg": "폰 뎁스 설정 저장"})
+
+    @app.post("/api/phone/autocal")
+    async def _autocal(req: Request):
+        """자동 보정 (autocal). 본문 {apply: true} 면 거치 자세를 폰 뎁스 설정에 저장하고 d 를 '책상 높이 재기' 결과로 (역기구학 탭에 넣기)."""
+        try:
+            b = await req.json()
+        except Exception:
+            b = {}
+        b = b if isinstance(b, dict) else {}
+        cfg = DP.load_cfg(cfg_file)
+        r = await asyncio.to_thread(autocal, cfg)
+        if r.get("ok") and b.get("apply") is True:
+            saved = {}
+            try:
+                saved = DP.clean_cfg(json.loads(cfg_file.read_text()))
+            except (OSError, ValueError, TypeError):
+                pass
+            saved["camera_to_robot"] = r["c2r"]
+            cfg_file.parent.mkdir(parents=True, exist_ok=True)
+            cfg_file.write_text(json.dumps(saved, ensure_ascii=False, indent=1))
+            prev["pos"] = None
+            r["applied"] = True
+            if r["in_range"]:
+                LAST_TABLE["r"] = {"d": r["d"], "source": "autocal", "in_range": True, "fill_ok": True, "t": time.time()}
+        return JSONResponse(r)
 
     @app.post("/api/phone/depth/start")
     async def _start():

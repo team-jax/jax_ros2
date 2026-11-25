@@ -19,6 +19,7 @@ MuJoCo 모델은 서버 프로세스가 아니라 자식 프로세스(이 파일
 import json
 import math
 import os
+HOME_FROM_IK = os.environ.get("JAX_HOME_FROM_IK") == "1"   # 1: 풀이 시작·HOME = IK 레포 env.HOME_ARM_QPOS (예전). 기본 0
 import subprocess
 import sys
 import threading
@@ -49,7 +50,10 @@ ARM_RADIUS = 0.03             # 팔 기준점(팔꿈치·손목) 둘레 링크 �
 # 책상 높이 d (어깨 축 아래 m, 2026-11-23 사용자: "책상 높이에 따른 동작 변화도 되게, 그렇게 광범위할 필요는 없고"). 기본 = realcoords.MAP_D 0.4775.
 # IK 모델(sim)은 어깨가 고정이라 d 가 다르면 책상 면을 옮긴다: table_z = TABLE_SURFACE_Z + (MAP_D − d). 책상 기준 높이(큐브 중심·집는 점·
 # 옮겨 가는 높이·손가락/큐브 책상 여유·'책상 위 cm')가 모두 이 값을 따른다 (_Solver.set_table_d). 요청마다 "d" 로 받고, 없으면 기본.
-D_RANGE = (0.44, 0.53)        # 받는 범위 (m), 밖은 거절. 2026-11-23 지도 초록 칸(1 cm): 0.43 = 0 (0.42 는 HOME 나가기 경유점도 안 풀림), 0.44 = 20, 0.45 = 45, 0.4775 = 124, 0.50 = 223, 0.53 = 360 — 책상이 높을수록(d 작을수록) 좁다
+TABLE_D_DEFAULT = 0.5575       # 2026-11-25 사용자: 로봇 프로파일을 아래로 더 달아 실물 책상이 모델(realcoords.MAP_D 0.4775)보다 8 cm 낮다
+                               # (폰 IMU·큐브 마커 실측 0.555~0.560). 칸을 비우면 이 값 — 예전엔 0.4775 라 손이 8 cm 위에서 멈췄다.
+                               # MAP_D 는 sim 장면 기준(table_z 계산)으로만 쓴다. 강화학습 정책 장면은 0.4775 그대로 (학습값)
+D_RANGE = (0.44, 0.60)        # 2026-11-25: 실물 책상이 어깨 아래 약 0.557 m (폰 IMU·큐브 마커로 잼) → 0.60 까지. 받는 범위 (m), 밖은 거절. 2026-11-23 지도 초록 칸(1 cm): 0.43 = 0 (0.42 는 HOME 나가기 경유점도 안 풀림), 0.44 = 20, 0.45 = 45, 0.4775 = 124, 0.50 = 223, 0.53 = 360 — 책상이 높을수록(d 작을수록) 좁다
 GRASP_MODES = ("auto", "vertical", "horizontal", "tilted")   # 집는 방향 (2026-11-24, pick_plan.GRASP_MODES 와 같은 값): 자동 / 수직(위에서) / 수평(옆에서 밀어 넣기)
 GRASP_TILT_TOL = 3.0         # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
 
@@ -93,6 +97,7 @@ class _Solver:
         self.finger_geoms = [g for g in range(m.ngeom) if env._is_hand_geom[g] and m.geom_contype[g]]
         self.table_z = float(E.TABLE_SURFACE_Z)
         self.table_d = float(R.MAP_D)   # 책상 높이 (어깨 축 아래 m). set_table_d 로 바꾼다
+        self.set_table_d(None)          # 기본 = TABLE_D_DEFAULT (실물 책상)
         # 책상 발자국 (sim x0, x1, y0, y1) = 앞 끝(로봇 쪽) sim x ≤ TABLE_NEAR_X (0.20 = 기둥 앞면 0.30 − STAND_GAP 0.10, env 장면의
         # table_top 상자 앞 끝과 같음) 인 반평면. 옆·먼 끝은 env 장면에선 도달 맵으로 정한 크기(반폭 WORK_Y_MAX + 0.08, 먼 끝
         # WORK_X_MIN − 0.10)라 실물 책상이 아니다 → 끝없이 (보수적: 손가락이 그쪽에선 늘 책상 면 위여야). 2026-11-21 HOME = 모든 관절 0
@@ -143,9 +148,9 @@ class _Solver:
     def set_table_d(self, d=None):
         """책상 높이 d (어깨 축 아래 m, None·빈 값 = 기본 MAP_D). D_RANGE 밖이면 ValueError. 기본이면 table_z 는 env 값 그대로."""
         R = self.R
-        d = float(R.MAP_D) if d in (None, "") else float(d)
+        d = TABLE_D_DEFAULT if d in (None, "") else float(d)
         if not (math.isfinite(d) and D_RANGE[0] - 1e-9 <= d <= D_RANGE[1] + 1e-9):
-            raise ValueError(d_range_text(d, float(R.MAP_D)))
+            raise ValueError(d_range_text(d, TABLE_D_DEFAULT))
         if d != self.table_d:
             self.table_d = d
             self.table_z = float(self.E.TABLE_SURFACE_Z) + (float(R.MAP_D) - d)
@@ -218,7 +223,7 @@ class _Solver:
         axis = np.array([math.cos(a), math.sin(a), 0.0])      # 기울기 축(세계) = rz·e_x
         dof = m.jnt_dofadr[self.jid]
         lim = m.jnt_range[self.jid]
-        home = np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
+        home = self.home_arm
         jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
         jpw, jrw = np.zeros((3, m.nv)), np.zeros((3, m.nv))
         damp = 1e-3 * np.eye(6)
@@ -313,6 +318,16 @@ class _Solver:
                 low = min(low, float(p[2]) - ARM_RADIUS)
         return low
 
+    @property
+    def home_arm(self):
+        """풀이 시작점·끌어당김 자세(rad). 기본 = 모든 관절 0 (실물 원점, 대시보드 HOME). IK 레포의 env.HOME_ARM_QPOS 는 sim 의 손바닥-아래
+        자세(위팔 143°·손목 −90°)라 이 대시보드의 관절 범위(위팔 ±90)·계획 가지(위팔 0 근처)와 다른 가지다 — 그걸 시작점으로 쓰면
+        '어깨 옆 0° 고정'에서 풀이가 거의 다 실패해 지도가 '큐브 집기·놓을 자리 둘 다 안 풀림' 으로 나왔다 (2026-11-24: 20건 중 18건
+        NEITHER → 0 시작점은 0건, 12건 둘 다 풀림). JAX_HOME_FROM_IK=1 이면 예전처럼 env 값."""
+        if HOME_FROM_IK:
+            return self.np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
+        return self.np.zeros(len(self.arm))
+
     def set_ranges(self, ranges_deg, servo_unlimited=False):
         """관절 한계 = 모델(hand_roll ±88) ∩ 보낼 수 있는 범위(calibration cmd_range). servo_unlimited: 진단용으로 hand_roll 만 URDF ±120."""
         np = self.np
@@ -329,7 +344,7 @@ class _Solver:
     def solve_from(self, seed, target, rot, its=400):
         self.d.qpos[self.qadr] = seed
         self.d.qvel[:] = 0
-        _, pe, re_ = self.solve_site_pose(self.m, self.d, self.site, self.jid, target, rot, self.E.HOME_ARM_QPOS,
+        _, pe, re_ = self.solve_site_pose(self.m, self.d, self.site, self.jid, target, rot, self.home_arm,
                                           position_tolerance=0.0005, rotation_tolerance=0.004, max_iterations=its)
         return self.d.qpos[self.qadr].copy(), pe, re_
 
@@ -360,7 +375,7 @@ class _Solver:
 
     def seeds(self, current, few=False):
         np, E = self.np, self.E
-        home = np.asarray(E.HOME_ARM_QPOS, dtype=float)
+        home = self.home_arm
         out = ([current] if current is not None else []) + [home]
         if few:
             return out + [np.zeros(len(self.arm))]
@@ -490,7 +505,7 @@ class _Solver:
         out = []
         if mode == "position":
             # 손목 3 관절 = 지금 값(current, 없으면 HOME) 그대로. 시작점: 직전 보낸 해·지금·HOME·0 의 앞 4 관절
-            hold = current if current is not None else np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
+            hold = current if current is not None else self.home_arm
             if self.use_analytic(mode, ref, lim):
                 hold_c = np.clip(hold, lim[:, 0], lim[:, 1])
                 if ref == "wrist":
@@ -603,7 +618,7 @@ class _Solver:
         # 기준 자세 = 지금 팔(피드백·서보 보낸 값), 빠진 관절은 직전 보낸 해(near_deg), 그것도 없으면 HOME
         cur = b.get("current_deg") or {}
         nd = b.get("near_deg") or {}
-        home = np.asarray(E.HOME_ARM_QPOS, dtype=float)
+        home = self.home_arm
         current = None
         if any(n in cur or n in nd for n in self.arm):
             current = np.array([math.radians(float(cur[n])) if n in cur else math.radians(float(nd[n])) if n in nd else home[i]
@@ -622,7 +637,7 @@ class _Solver:
         self.analytic = None
         cands, lim = self.candidates(mode, yaw, point, current, ranges, tilt_max=tilt_max, near=near, ref=pref)
         an = self.analytic
-        ref = current if current is not None else np.asarray(E.HOME_ARM_QPOS)
+        ref = current if current is not None else self.home_arm
         tol_p, tol_r = TOL_POS, TOL_ROT   # env.reachable 과 같은 5 mm, 손 방향 1.5°
         good = [c for c in cands if c["pe"] <= tol_p and c["re"] <= tol_r]
         for c in cands:
@@ -843,7 +858,7 @@ class _Solver:
         pc = np.asarray(self.to_sim([float(cube[0]), float(cube[1]), zc]))
         pt = np.asarray(self.to_sim([float(target[0]), float(target[1]), zc]))
         y = R.fold_yaw(yaw + R.SIM_FROM_REAL_YAW)
-        home = np.clip(np.asarray(E.HOME_ARM_QPOS, dtype=float), lim[:, 0], lim[:, 1])
+        home = np.clip(self.home_arm, lim[:, 0], lim[:, 1])
         tries, pick_ok = [], []
         for turn in sorted({round(y, 6), round(y + 90.0, 6), round(y - 90.0, 6)}, key=abs):
             for flip in (False, True):
@@ -1248,7 +1263,7 @@ def d_range_text(d, map_d):
 
 def table_d(ik_dir, v):
     """화면·API 가 준 책상 높이(어깨 축 아래 m) → float. None·빈 값 = 기본 MAP_D. 숫자가 아니거나 D_RANGE 밖이면 ValueError(화면에 보일 말)."""
-    md = _map_d(ik_dir)
+    md = TABLE_D_DEFAULT
     if v is None or (isinstance(v, str) and not v.strip()):
         return md
     try:
@@ -1323,11 +1338,12 @@ def pair(ik_dir, body, ranges_deg):
     try:
         cube = [float(v) for v in b["cube"]][:3]
         target = [float(v) for v in b["target"]][:2]
-        fix = {str(k): float(v) for k, v in (b.get("fix_deg") or {}).items()}
+        fd = b.get("fix_deg")
+        fix = {str(k): float(v) for k, v in (fd if isinstance(fd, dict) else {}).items()}
         tm = float(b.get("tilt_max_deg") if b.get("tilt_max_deg") is not None else TILT_MAX_DEFAULT)
         if len(cube) < 2 or len(target) < 2 or not all(math.isfinite(v) and abs(v) <= 2.0 for v in cube[:2] + target):
             raise ValueError
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return {"ok": False, "reason": "cube [x, y, yaw], target [x, y] (m, °)"}
     try:
         d = table_d(ik_dir, b.get("d"))

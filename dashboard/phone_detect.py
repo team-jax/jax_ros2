@@ -26,7 +26,9 @@ REF_MM = {0: (-122.0, 78.0), 1: (122.0, 78.0), 2: (122.0, 0.0), 3: (122.0, -78.0
 CUBE_ID = 0
 CUBE_MARKER_MM = 40.0
 CUBE_IDS = tuple(range(0, 5))     # 탑 쌓기: 큐브마다 다른 마커 (4x4 ID 0~4, 같은 40 mm) — detect_cubes
-MAX_LEVELS = 5                    # detect_cubes 가 보는 층 수 (윗면 높이 = 층 × cube_h)
+MAX_LEVELS = 5                    # detect_cubes 가 보는 층 수 (윗면 높이 = 층 × cube_h). cfg "max_levels" 로 줄인다 —
+                                  # 실시간 인식(live_api)은 2026-11-25 탑 쌓기를 없애 1 (큐브는 늘 책상 위): 기준 종이 없이 층을 고르면
+                                  # 큐브마다 마커 크기 오차(±7%)로 한 층(5 cm = 10%) 틀렸다
 DEFAULT_CFG = {"x": -0.05, "y": -0.32, "rot_deg": 0.0, "cube_h": 0.05}   # 종이 가운데 (실좌표 m), 종이 돌아간 각, 큐브 높이
 MAX_SIDE = 2000   # 이보다 큰 사진은 줄여서 찾는다
 CAD_LEVEL_FRAC = 0.25   # 기준 종이 없을 때: 큐브 층이 두 층 사이 이 비율 (0 = 딱, 0.5 = 한가운데) 넘게 어중간하면 층 의심 (level_unsure)
@@ -195,7 +197,7 @@ def detect(image_bytes, cfg=None):
 def _cad(cv2, np, cfg, found, w, h, ids):
     """기준 종이 없을 때의 카메라 (phone_table.cad_camera) — cfg 에 intr·td 가 없으면 None. image_rot_q = 사진 회전 설정 (phone_table.rot_from_c2r)."""
     import phone_table as PT
-    return PT.cad_camera(cv2, np, found, cfg.get("intr"), w, h, cfg.get("td"), ids, cfg.get("image_rot_q"))
+    return PT.cad_camera(cv2, np, found, cfg.get("intr"), w, h, cfg.get("td"), ids, cfg.get("image_rot_q"), cfg.get("c2r"))
 
 
 def _finish_one(cv2, out, vis, lw, top, side, cpix):
@@ -274,7 +276,7 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
         rows, cost = [], 0.0
         for i in seen:
             es = []
-            for lv in range(MAX_LEVELS):
+            for lv in range(max(1, int(cfg.get("max_levels") or MAX_LEVELS))):
                 top, side = _top(np, cam, found[i], (lv + 1) * ch)
                 es.append((abs(side - CUBE_MARKER_MM) / CUBE_MARKER_MM, lv, top, side))
             best = min(es, key=lambda r: (r[0], r[1]))

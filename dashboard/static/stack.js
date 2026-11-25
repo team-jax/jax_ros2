@@ -7,6 +7,7 @@
 // app.js·direct.js·phone.js 는 안 고친다: 탭 버튼도 여기서 단다 (phone.js 와 같은 방식).
 "use strict";
 (function () {
+  if (!window.JAX_STACK_ON) return;   // 2026-11-25 사용자: 탑 쌓기 탭 없앰 — 예전 페이지가 이 파일을 읽어도 탭을 안 단다 (되살리려면 window.JAX_STACK_ON = true)
   const page = document.getElementById("page-stack");
   if (!page) return;
   const ST = { det: null, grasp: {}, busy: false, going: false, mapMode: "tower", played: false, sawRun: false, view: null, extra: [], att: null, rows: null, endT: 0 };
@@ -300,10 +301,12 @@
     try {
       save();   // 누른 순서·탑 자리를 남긴다 (기본값 그대로 눌러도)
       if (!c.fields.stack) c.fields.stack = el("input", { type: "hidden" });   // 역기구학 탭·휴대폰 탭의 계획은 이 칸을 비워 보낸다
+      const g0 = c.fields.grasp ? c.fields.grasp.value : null;   // 탑 쌓기는 수직으로 — 역기구학 탭의 집는 방향은 되돌린다 (2026-11-25 검토)
       for (const [k, v] of Object.entries(st.params)) c.fields[k].value = v;
       mapUpdate();
       const params = Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.type === "checkbox" ? (i.checked ? "1" : "") : i.value]));
       c.fields.stack.value = "";
+      if (c.fields.grasp && g0 !== null) c.fields.grasp.value = g0;
       const m0 = S.traj_mtime, st0 = svcById("pick_dry").started;
       const head = `${st.level + 1}층: ${st.cube.id}번 옮기기`;
       show(ST.note, head + ": 계획 중…", "run");
