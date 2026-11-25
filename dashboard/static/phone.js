@@ -181,11 +181,16 @@ function phLive(all) {
   const pl = r.pipeline || {}, fresh = !!r.fresh;
   PH.bPipe.textContent = pl.alive ? "폰 프로그램 끄기" : "폰 프로그램 켜기";
   PH.bPipe.classList.toggle("red", !!pl.alive); PH.bPipe.classList.toggle("line", !pl.alive);
-  PH.bOn.hidden = !!pl.alive || fresh;
+  // 2026-11-25: 폰 프로그램은 살아 있는데 영상이 멈춤 (USB 가 끊겨 다시 붙기 5 번 실패한 뒤) → 큰 버튼을 '다시 켜기' 로 (예전엔 숨겨져 끄기를 못 찾았다)
+  const age = all.age_s;
+  PH.stuck = !!pl.alive && !fresh && (age == null || age > 30) && Date.now() - (PH.pipeT || 0) > 40000;
+  PH.bOn.hidden = fresh || (!!pl.alive && !PH.stuck);
+  PH.bOn.textContent = PH.stuck ? "폰 카메라 다시 켜기 (영상이 멈춤)" : "폰 프로그램 켜기";
   PH.pipeNote.textContent = pl.alive ? `폰 프로그램 켜짐 (pid ${pl.pid})` + (fresh ? "" : " — 아직 결과 없음: 폰 잠금을 풀고 몇 초 가만히. " + (pl.log || []).slice(-1).join(""))
     : fresh ? "결과가 들어오는 중 (다른 곳에서 켠 프로그램)" : "폰 프로그램 꺼짐" + ((PH.missing || []).length ? " — 이 PC 에 없는 것: " + PH.missing.join(" / ") : "") + ((pl.log || []).length > 1 ? " · 마지막 기록: " + pl.log.slice(-1)[0] : "");
   PH.dStat.hidden = fresh;
-  PH.dStat.textContent = pl.alive ? "폰 프로그램 켜는 중 — 폰 잠금을 풀고 몇 초 가만히 (끄기는 아래 준비)" : PH.pipeNote.textContent;
+  PH.dStat.textContent = PH.stuck ? `폰 프로그램은 켜져 있는데 영상이 ${age == null ? "" : Math.round(age) + "초째 "}없음 — 위 '다시 켜기' (USB 가 끊겼다 붙었을 때 이렇게 멈춘다)`
+    : pl.alive ? "폰 프로그램 켜는 중 — 폰 잠금을 풀고 몇 초 가만히 (끄기는 아래 준비)" : PH.pipeNote.textContent;
   // 영상: MJPEG 스트림 하나를 열어 둔다 (새 프레임마다 바로 보임, 최대 15 Hz). 끊기면(영상 없음) 닫았다가 다시 열기
   // 뎁스·세그 결과 (폰 프로그램의 inference.png: 객체 세그 + 뎁스 색) — 원본 영상 아래 (2026-11-24 사용자)
   if (!PH.inf) {
@@ -337,11 +342,21 @@ async function phSaveDepthCfg() {
   if (r.ok) { await phLoadDepthCfg(); lvPoll(); }
 }
 
-async function phPipe() {
+async function phPipe(ev) {
   const on = PH.dp && PH.dp.pipeline && PH.dp.pipeline.alive;
-  PH.bPipe.disabled = true;
-  await post(on ? "/api/phone/depth/stop" : "/api/phone/depth/start");
-  PH.bPipe.disabled = false;
+  PH.bPipe.disabled = PH.bOn.disabled = true;
+  try {
+    if (on && PH.stuck && ev && ev.currentTarget === PH.bOn) {        // 멈춘 프로그램: 끄고 다시 켜기
+      phShow(PH.res, "폰 카메라 다시 켜는 중… (끄고 켜기)", "run");
+      await post("/api/phone/depth/stop", {}, true);
+      await phSleep(1500);
+      const r = await post("/api/phone/depth/start");
+      if (r.ok) PH.pipeT = Date.now();
+    } else {
+      const r = await post(on ? "/api/phone/depth/stop" : "/api/phone/depth/start");
+      if (!on && r.ok) PH.pipeT = Date.now();
+    }
+  } finally { PH.bPipe.disabled = PH.bOn.disabled = false; }
   phLoadDepthCfg();     // 붙은 폰이 바뀌었으면 보정 파일 줄도
   lvPoll();
 }
@@ -383,13 +398,19 @@ async function phPlanPlay(cube, target, note) {
   // 궤적이 나왔으면(종료코드 1 = 검사 거절이어도 역기구학 탭처럼) 재생 버튼으로 — 문제는 그 버튼의 검사·확인창이 다시 묻는다
   const got = sv.exit_code !== 3 && await phWait(() => S.traj_mtime != null && S.traj_mtime !== m0 && T.mtime === S.traj_mtime && T.info && T.info.mtime === S.traj_mtime, 4000);
   if (!got || !T.traj) { phShow(note, "계획 실패 — 팔은 안 움직임", "bad", txt || `종료코드 ${sv.exit_code}`); return { ok: false, why: "계획 실패: " + (txt || `종료코드 ${sv.exit_code}`) }; }
-  const pass = txt || "계획 나옴";
+  let pass = txt || "계획 나옴";
+  const gst = (T.traj && T.traj.grasp) || {};
+  const hrI = (T.traj.joint_names || []).indexOf("hand_roll");
+  const roll = hrI >= 0 ? Math.max(...T.traj.positions.map((q) => Math.abs(q[hrI] * 180 / Math.PI))) : 0;
+  if (gst.style === "tilted") {    // 2026-11-25 '너무 돌아서 못 잡음': 수직으로 안 닿는 자리(왼쪽·먼 곳)는 기울여 잡아 손을 크게 돌린다
+    pass += ` · ⚠ 기울여 잡기 (손 돌림 ${Math.round(roll)}°) — 잘 안 잡힐 수 있다: 큐브를 로봇 앞 조금 오른쪽 (x −0.05, y −0.22~−0.26) 으로 옮기면 수직으로 잡는다`;
+  }
   await phSleep(600);   // 재생 버튼이 새 궤적으로 켜질 때까지 (다음 화면 갱신)
   const kind = S.mode && S.mode.kind;
   const btn = kind === "virtual" ? T.vplay : kind === "direct" ? (typeof D !== "undefined" && D.play && D.play.go) : null;
   if (!btn) { phShow(note, pass, cls, "이 모드의 재생은 역기구학 탭에서"); return { ok: false, why: "이 모드의 재생은 역기구학 탭에서" }; }
   if (btn.disabled) { const w = btn.title || (kind === "direct" ? "연결 탭에서 팔 연결·원점 먼저" : "이미 재생 중"); phShow(note, pass, "warn", "재생은 아직 못 함: " + w); return { ok: false, why: "재생 못 함: " + w }; }
-  phShow(note, pass, cls);
+  phShow(note, pass, gst.style === "tilted" ? "warn" : cls);
   btn.click();   // 원래 버튼 = 원래 확인창 (가상: 1번, 실물: 2번 + 검사 문제면 한 번 더)
   return { ok: true };
 }

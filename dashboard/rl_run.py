@@ -19,7 +19,7 @@ WORKER = HERE / "rl_worker.py"
 MARK = "@@RL@@"
 TIMEOUT_S = 120
 LIMITS = {"x_cm": (-60.0, 60.0), "y_cm": (-80.0, 80.0), "yaw_deg": (-180.0, 180.0), "mass_g": (20.0, 100.0),
-          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0), "insert_push_cm": (0.0, 5.0), "insert_side_cm": (-5.0, 5.0),
+          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0), "insert_push_cm": (0.0, 5.0), "insert_side_cm": (-5.0, 5.0), "insert_tilt_deg": (-30.0, 30.0),
           "grip_force_x": (1.0, 6.0)}     # 2026-11-25: 이 줄이 없어 grip_force_x 를 넘기면 KeyError (rl_worker.GRIP_FORCE_RANGE 와 같게)
 _lock = threading.Lock()     # 한 번에 하나만 (CPU 를 먹는다, 폰·PC 가 같이 눌러도 섞이지 않게)
 _info_cache = {}
@@ -27,6 +27,7 @@ REF_X, REF_Y = -0.048, -0.285    # 기준 큐브 (위치 오프셋 0, 0) 의 로
 TABLE_TOP_Z = -0.4775            # 로봇 틀에서 책상 윗면 (어깨 아래 47.75 cm). 큐브 중심 = +2.5 cm
 RUNS_KEEP = 5
 INSERT_SIDE_CM = -2.0            # 2026-11-25 사용자 '밀어 넣기 할 때 너무 왼쪽': 같은 구간에 로봇 옆으로 (cm, + 왼쪽 / − 오른쪽, −5~5)
+INSERT_TILT_DEG = 30.0           # 2026-11-25 사용자 '손목을 아래로 20° 정도 꺾고 잡으면' → '좀 더 구부려' 30°: 같은 구간에 손을 손끝 쪽이 아래로 (쥐는 점은 그대로, −30~30)
 INSERT_PUSH_CM = 2.0             # 2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': INSERT~들기 동안 쥐는 점을 로봇 앞(−y)으로 이만큼 더 (cm, 0~5)
 _runs = {}                       # run_id -> 결과 (실물 재생이 '화면에 보인 그 궤적'만 보내게)
 
@@ -77,7 +78,8 @@ def run(ik_dir, body):
                "yaw_deg": _num(b, "yaw_deg", 0.0), "mass_g": _num(b, "mass_g", 40.0),
                "home": b.get("home") is True}   # 기본 = 들고 ㄴ자 복귀(쥔 채) — 화면 기본과 같게 (2026-11-25)
         arg["insert_push_cm"] = _num(b, "insert_push_cm", INSERT_PUSH_CM)
-        arg["insert_side_cm"] = _num(b, "insert_side_cm", INSERT_SIDE_CM)   # INSERT 중 앞으로 더 (rl_worker._insert_push)
+        arg["insert_side_cm"] = _num(b, "insert_side_cm", INSERT_SIDE_CM)
+        arg["insert_tilt_deg"] = _num(b, "insert_tilt_deg", INSERT_TILT_DEG)   # INSERT 중 앞으로 더 (rl_worker._insert_push)
         if b.get("grip_force_x") is not None:           # 정책 쥐는 힘 배율 (rl_worker.GRIP_FORCE_X, 기본 3)
             arg["grip_force_x"] = _num(b, "grip_force_x", 3.0)
         tx, ty = b.get("target_x_cm"), b.get("target_y_cm")     # 놓을 자리 (선택): 둘 다 있거나 둘 다 없어야 한다

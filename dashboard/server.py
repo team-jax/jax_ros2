@@ -470,7 +470,24 @@ RL_REACH_FIX_M = 0.05  # 2026-11-25 사용자 '좀 더 앞으로 가서 잡게' 
                        # 본문 reach_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm). 수동 위치(강화학습 탭 x·y 칸)에는 안 붙인다
 RL_SIDE_FIX_M = -0.04  # 2026-11-25 사용자 '집는 걸 로봇 기준 오른쪽으로 2 cm' → '로봇 얼굴 기준 좀 더 오른쪽' 4 cm: 카메라 큐브 → 강화학습 위치를 로봇 틀 x 로 (+x = 로봇 왼쪽 → 오른쪽 = −).
                        # 본문 side_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm, + = 왼쪽)
+RL_MARKER_HEIGHT = True   # 2026-11-25 '카메라하고 좀 더 맞혀야': 큐브 실제 높이를 마커 크기(40 mm)로 잰다 — 받침대가 정책 높이와 2~3 cm 달라도 자리가 맞게
+RL_MARKER_HEIGHT_MAX_M = 0.04   # 마커로 잰 높이가 정책 높이에서 이보다 멀면 (받침대 없음·잘못 읽음) 안 쓰고 정책 높이로
 RL_TABLE_D = 0.4775   # 강화학습 정책이 학습한 책상 윗면 (어깨 축 아래 m) — 실물 책상(0.5575)이면 큐브를 약 8 cm 받침대 위에
+
+
+def _rl_reproject(x, y, td_from, td_to, cube_h=0.05):
+    """카메라가 책상 높이 td_from 으로 잰 큐브 윗면 (x, y) 를 같은 시선 그대로 td_to 높이 책상 위 큐브로 (2026-11-25).
+    phone_detect 는 카메라 → 마커 시선을 '윗면 높이' 평면에서 끊어 자리를 정한다 → 높이만 바꿔 다시 끊으면 된다. → (x, y, 거리 비율)"""
+    import live_api
+    import phone_api
+    import phone_depth as DP
+    c2r, _ = phone_api.live_c2r(DP.load_cfg(live_api.LIVE.log_dir / "phone_depth.json"))
+    cx, cy, cz = (float(v) for v in c2r[:3])
+    z0, z1 = -float(td_from) + cube_h, -float(td_to) + cube_h
+    if abs(z0 - cz) < 1e-6:
+        return x, y, 1.0
+    t = (z1 - cz) / (z0 - cz)
+    return cx + (x - cx) * t, cy + (y - cy) * t, t
 
 
 def _rl_live_cube(b):
@@ -482,12 +499,9 @@ def _rl_live_cube(b):
         return {"ok": False, "error": "실시간 인식이 꺼져 있음"}
     pick = b.get("pick")
     pick = int(pick) if isinstance(pick, (int, float)) and not isinstance(pick, bool) else None
-    t0, r = time.time(), None
-    while time.time() - t0 < 5.0:     # 책상 높이를 바꾸면 다음 프레임에서 다시 계산 — 그 결과가 올 때까지
-        r = live_api.cubes(RL_TABLE_D, pick)
-        if not r.get("td_mismatch") and not r.get("stale"):
-            break
-        time.sleep(0.3)
+    # 2026-11-25 '카메라가 이상해짐': 예전엔 서버 책상 높이를 RL_TABLE_D 로 바꿨다 → 휴대폰·역기구학 탭(0.5 초마다 d 0.5575)과 서로 덮어써
+    # 자리가 높이마다 몇 cm 씩 왔다갔다. 이제 서버 높이는 그대로 두고, 그 높이로 잰 큐브를 같은 시선으로 RL_TABLE_D 높이에 다시 투영한다.
+    r = live_api.cubes(None, pick)
     p = (r or {}).get("pick") or {}
     if not p.get("ok"):
         return {"ok": False, "error": "카메라가 큐브를 못 찾음 — " + str(p.get("reason") or (r or {}).get("reason") or "영상 없음"), "warn": p.get("warn") or []}
@@ -501,6 +515,30 @@ def _rl_live_cube(b):
     # 높이 판정 = 마커 크기 (2026-11-25 ArUco 중심 — 뎁스는 보조): 정책 책상보다 8 cm 낮은(받침대 없음) 큐브는 마커가 약 15% 작게(≈34 mm) 재진다
     cube_row = next((x for x in (r or {}).get("cubes", []) if x.get("id") == p.get("id")), None)
     mm = (cube_row or {}).get("marker_mm")
+    td_used = ((r or {}).get("table") or {}).get("d")
+    reproj = None
+    if r.get("mode") == "camera" and td_used is not None:
+        x0, y0, mm0 = p["cube"]["x"], p["cube"]["y"], mm
+        x2, y2, ratio = _rl_reproject(x0, y0, td_used, RL_TABLE_D)
+        if mm is not None:
+            mm = round(float(mm) * ratio, 1)     # 정책 높이로 본 마커 크기 (받침대 없음 검사용 — 가까운 높이로 잰 만큼 크게 보였다)
+        d_at = RL_TABLE_D
+        if RL_MARKER_HEIGHT and mm0:             # 마커가 40 mm 로 보이는 높이 = 큐브 실제 높이 (같은 시선 위)
+            import phone_detect as PD
+            import live_api as _L, phone_api as _PA, phone_depth as _DP
+            cz = float(_PA.live_c2r(_DP.load_cfg(_L.LIVE.log_dir / "phone_depth.json"))[0][2])
+            z0 = -float(td_used) + 0.05
+            z_true = cz + (PD.CUBE_MARKER_MM / float(mm0)) * (z0 - cz)
+            d_true = 0.05 - z_true
+            if abs(d_true - RL_TABLE_D) <= RL_MARKER_HEIGHT_MAX_M:
+                d_at = d_true
+                x2, y2, _ = _rl_reproject(x0, y0, td_used, d_true)
+            reproj_marker = round(d_true, 4)
+        else:
+            reproj_marker = None
+        reproj = {"from_d": td_used, "to_d": round(d_at, 4), "marker_d": reproj_marker,
+                  "dx_cm": round((x2 - x0) * 100, 1), "dy_cm": round((y2 - y0) * 100, 1)}
+        p = {**p, "cube": {**p["cube"], "x": round(x2, 4), "y": round(y2, 4)}}
     warn = list(p.get("warn") or [])     # 뎁스 높이(depth_height_cm)는 표시만 — 판정은 마커 크기 (2026-11-25 '뎁스 버리고 ArUco 를 믿자')
     if mm is not None and mm < 36.0:
         return {"ok": False, "error": f"큐브 마커가 {mm:.1f} mm 로 작게 재짐 (40 mm) — 큐브가 정책 높이보다 낮은 듯 (받침대 없이 실물 책상 위?). "
@@ -523,7 +561,7 @@ def _rl_live_cube(b):
     gx += side                                                                                                    # 로봇 기준 옆 (− = 오른쪽)
     spot = rl_run.spot_from_robot(gx, gy, c["yaw_deg"])
     return {"ok": True, "robot": {"x": c["x"], "y": c["y"], "z": -RL_TABLE_D + 0.025, "yaw_deg": c["yaw_deg"]}, "spot": spot,
-            "reach_fix_cm": round(fix * 100, 1), "side_fix_cm": round(side * 100, 1), "aim": {"x": round(gx, 4), "y": round(gy, 4)},
+            "reach_fix_cm": round(fix * 100, 1), "side_fix_cm": round(side * 100, 1), "reproject": reproj, "aim": {"x": round(gx, 4), "y": round(gy, 4)},
             "text": p.get("text"), "id": p.get("id"), "warn": warn, "depth_height_cm": h, "marker_mm": mm, "table_d": RL_TABLE_D}
 
 

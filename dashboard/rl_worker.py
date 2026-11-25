@@ -149,12 +149,17 @@ def _ik_translate(C, mujoco, c, q14, hand_q, tip0, delta, iters=400, wr=2.0, q_i
     s.qpos[c.qadr] = q14
     dof, qa = c.vadr[c.arm[:7]], c.qadr[c.arm[:7]]
     lo, hi = c.lo[c.arm[:7]].copy(), c.hi[c.arm[:7]].copy()
+    q0 = np.asarray(q14, float)[c.arm[:7]]              # 원래 궤적 자세 (범위 인정·널 공간 끌림)
     if REAL_LIM:                                                   # 실물이 못 따라가는 각도(예: 손목 비틀기 −74°)로는 풀지 않는다
         for i, nm in enumerate(DASH[:7]):
             if nm in REAL_LIM:
                 a, b = REAL_LIM[nm]
                 lo[i] = max(lo[i], math.radians(a + REAL_LIM_MARGIN_DEG))
                 hi[i] = min(hi[i], math.radians(b - REAL_LIM_MARGIN_DEG))
+        lo, hi = np.minimum(lo, q0), np.maximum(hi, q0)  # 원래 궤적이 이미 있는 각은 범위로 인정 (2026-11-25: shoulder_yaw 0° 가 여유 2° 에 걸려
+                                                         # IK 가 시작부터 어깨를 2° 돌려 놓았다 → 손끝 오차 7~18 mm)
+    if q_init is not None:                            # 이어서 풀기 (직전 프레임 해 + 원래 궤적의 이번 움직임) — 해가 프레임마다 다른 쪽으로 튀지 않게
+        s.qpos[qa] = np.clip(np.asarray(q_init, float), lo, hi)
     jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
     target = tip0 + delta
     ep = er = None
@@ -174,11 +179,16 @@ def _ik_translate(C, mujoco, c, q14, hand_q, tip0, delta, iters=400, wr=2.0, q_i
         mujoco.mj_jacBody(m, s, jp, jr, c.hand_body)
         J = np.vstack([Jp, jr[:, dof]])
         e = np.concatenate([np.clip(ep, -0.01, 0.01), np.clip(wr * er, -0.05, 0.05)])
-        s.qpos[qa] = np.clip(s.qpos[qa] + J.T @ np.linalg.solve(J @ J.T + 0.01 ** 2 * np.eye(6), e), lo, hi)
+        Jinv = J.T @ np.linalg.inv(J @ J.T + 0.01 ** 2 * np.eye(6))
+        dq = Jinv @ e
+        if IK_NULL_GAIN:          # 팔 7 관절 · 손 6 값 → 남는 한 방향은 원래 궤적 자세 쪽으로 (2026-11-25: 떠돌아 손목·손 돌림이 프레임마다 튀었다)
+            dq += IK_NULL_GAIN * (np.eye(7) - Jinv @ J) @ np.clip(q0 - s.qpos[qa], -0.1, 0.1)
+        s.qpos[qa] = np.clip(s.qpos[qa] + dq, lo, hi)
     mujoco.mj_kinematics(m, s)
     return s.qpos[qa].copy(), float(np.linalg.norm(ep)), float(math.degrees(np.linalg.norm(er)))
 
 
+IK_NULL_GAIN = 0.3   # _ik_translate 남는 방향(널 공간)을 원래 자세 쪽으로 끄는 세기
 REAL_LIM = None   # 실물 보정이 허용하는 팔 7관절 범위 {이름: [lo°, hi°]} — 옮기기 IK 가 이 안에서만 풀게 (cmd_run 이 채운다)
 REAL_LIM_MARGIN_DEG = 2.0
 PLACE_ORI_MAX_DEG = 8.0  # 방향을 완화해서라도 풀 때 허용하는 손 방향 오차(큐브는 손가락이 쥐고 있어 몇 도는 괜찮다)
@@ -452,11 +462,70 @@ def patch_grip(C, x):
 
 
 INSERT_PUSH_FWD = (0.0, -1.0, 0.0)   # 로봇 틀 '앞' (−y)
+TILT_TIP_TOL_M = 0.003               # 손 숙이기: 손끝을 이 안으로 못 지키면 덜 숙인다
+TILT_STEP_DEG = 1.0                  # 숙이는 각을 재생 프레임(30 Hz)마다 이만큼까지만 바꾼다 (= 초당 30°, 이웃 프레임이 튀지 않게)
+TILT_LEAD_S = 2.0                    # 숙이기를 SETTLE 전 이 시간 동안 (다가가며) 미리 — INSERT(실물에서 천천히)에는 밀어 넣기만
 INSERT_PUSH_LEFT = (1.0, 0.0, 0.0)   # 로봇 틀 '왼쪽' (+x) — side_m 이 − 면 오른쪽
 
 
-def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0):
+def _tilt_axis(tip, hand_pos):
+    f = np.asarray(tip, float) - np.asarray(hand_pos, float)
+    f[2] = 0.0
+    n = np.linalg.norm(f)
+    return None if n < 1e-6 else np.cross(f / n, [0.0, 0.0, 1.0])
+
+
+def _rotm(a, th):
+    a = np.asarray(a, float)
+    K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+    return np.eye(3) + math.sin(th) * K + (1 - math.cos(th)) * (K @ K)
+
+
+def _tilt_quat(C, hq, tip, hand_pos, deg):
+    """손 방향 hq 를 손끝 쪽(손 → 손가락 끝, 수평 성분)이 아래로 deg 숙게 돌린 것 (world 수평축 둘레). 손가락 방향이 거의 수직이면 그대로."""
+    f = np.asarray(tip, float) - np.asarray(hand_pos, float)
+    f[2] = 0.0
+    n = np.linalg.norm(f)
+    if n < 1e-6 or not deg:
+        return hq
+    f /= n
+    a = np.cross(f, [0.0, 0.0, 1.0])            # R(a, +θ) 는 f 를 위로 돌린다 → 아래는 −θ
+    th = -math.radians(deg)
+    q = np.array([math.cos(th / 2), *(a * math.sin(th / 2))])
+    return C.quat_mul(q, hq)
+
+
+def _hand_geoms(c):
+    """손 몸체와 그 아래(손가락) 의 충돌 geom 들."""
+    m = c.m
+    under = set()
+    for b in range(m.nbody):
+        a = b
+        while a > 0 and a != c.hand_body:
+            a = m.body_parentid[a]
+        if a == c.hand_body:
+            under.add(b)
+    return [g for g in range(m.ngeom) if m.geom_bodyid[g] in under and m.geom_contype[g]]
+
+
+def _low_pt(c, s, geoms):
+    """scratch s 자세에서 geoms (aabb 꼭짓점) 의 가장 낮은 점 (world xyz)."""
+    m = c.m
+    best = None
+    signs = np.array([[i, j, k] for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)], dtype=float)
+    for g in geoms:
+        R = s.geom_xmat[g].reshape(3, 3)
+        cl, hl = m.geom_aabb[g][:3], m.geom_aabb[g][3:]
+        pts = s.geom_xpos[g] + (cl + signs * hl) @ R.T
+        p = pts[int(np.argmin(pts[:, 2]))]
+        if best is None or p[2] < best[2]:
+            best = p.copy()
+    return best
+
+
+def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, tilt_deg=0.0):
     """2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': 재생 궤적의 frames 에서 쥐는 점을 로봇 앞(−y)으로 push_m 더 (손 방향 그대로, 실물 범위 안).
+    tilt_deg: '손목을 아래로 20° 꺾고 잡기' — 같은 구간에 손을 손끝 쪽이 아래로 숙게 돌린다 (쥐는 점은 그 자리 + 밀어 넣기, 팔이 받쳐 줌).
     INSERT 동안 0 → push_m (smoothstep), 잡고 드는 동안 push_m, RETURN 동안 → 0. 물리 시뮬(성공 판정·큐브 움직임)은 고치기 전 궤적 그대로.
     → (프레임 → 고친 14관절, 정보)"""
     ti, tg, tret = ph.get("INSERT"), ph.get("GRASP_LIFT"), ph.get("RETURN")
@@ -468,13 +537,18 @@ def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0):
     fw = Rm.T @ (push_m * np.array(INSERT_PUSH_FWD) + side_m * np.array(INSERT_PUSH_LEFT))   # 로봇 틀 앞·옆 → 시뮬 world (m)
     fw[2] = 0.0
     push_m = 1.0                             # 아래 w * push_m * fw = w * (앞·옆 이동)
-    out, worst = {}, 0.0
+    out, worst, worst_er, held, lifts = {}, 0.0, 0.0, [], []
+    ts = ph.get("SETTLE") or ti                      # 숙이기는 INSERT 전에 미리 (다가가는 끝 TILT_LEAD_S 동안) — INSERT 는 실물에서 천천히 가는 구간이라
+    t_tilt0 = max(0.0, ts - TILT_LEAD_S)             # 거기서 숙이면 재생이 길어졌다 (2026-11-25 30° 에서 58 초)
+    geoms = _hand_geoms(c) if tilt_deg else []
+    rows = []                                        # (k, w, wt, q14, tip0, hq, hpos, ax, piv)
     for k in frames:
         t = float(tr["t"][k])
-        if t < ti or t > tdone:
+        if t < (t_tilt0 if tilt_deg else ti) or t > tdone:
             continue
-        w = C.smoothstep((t - ti) / (tg - ti)) if t < tg else 1.0 if t < tret else 1.0 - C.smoothstep((t - tret) / (tdone - tret))
-        if w <= 1e-4:
+        w = 0.0 if t < ti else C.smoothstep((t - ti) / (tg - ti)) if t < tg else 1.0 if t < tret else 1.0 - C.smoothstep((t - tret) / (tdone - tret))
+        wt = C.smoothstep((t - t_tilt0) / max(ts - t_tilt0, 1e-6)) if t < ts else 1.0 if t < tret else 1.0 - C.smoothstep((t - tret) / (tdone - tret))
+        if w <= 1e-4 and (not tilt_deg or wt <= 1e-4):
             continue
         q14 = np.array(tr["q"][k], dtype=float)
         s = c.scratch
@@ -482,13 +556,71 @@ def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0):
         s.qpos[c.qadr] = q14
         mujoco.mj_kinematics(c.m, s)
         tip0 = np.mean([s.xpos[b] for b in c.tip_body], axis=0)
-        hq = s.xquat[c.hand_body].copy()
-        q7, ep, er = _ik_translate(C, mujoco, c, q14, hq, tip0, w * push_m * fw, iters=300)
-        q14[c.arm[:7]] = q7
-        out[k] = q14
-        worst = max(worst, ep)
+        hq, hpos = s.xquat[c.hand_body].copy(), s.xpos[c.hand_body].copy()
+        ax = _tilt_axis(tip0, hpos) if tilt_deg else None
+        piv = _low_pt(c, s, geoms) if ax is not None else None   # 회전 중심 = 가장 낮은 손가락 점 → 숙여도 손가락이 책상 쪽으로 안 내려감
+        rows.append((k, w, wt, q14, tip0, hq, hpos, ax, piv))
+
+    def solve(row, deg, q_init):
+        k, w, wt, q14, tip0, hq, hpos, ax, piv = row
+        if deg and ax is not None:
+            hq_t = _tilt_quat(C, hq, tip0, hpos, deg)
+            tip_t = piv + _rotm(ax, -math.radians(deg)) @ (tip0 - piv)   # 손끝도 같은 회전 (가장 낮은 점 둘레)
+        else:
+            hq_t, tip_t = hq, tip0
+        q7, ep, er = _ik_translate(C, mujoco, c, q14, hq_t, tip0, (tip_t - tip0) + w * push_m * fw, iters=400 if tilt_deg else 300, q_init=q_init)
+        return q7, ep, er, float(tip_t[2] - tip0[2])
+
+    # 1) 프레임마다 숙일 수 있는 최대 각 (손끝을 TILT_TIP_TOL_M 안으로 — 팔꿈치가 실물 범위 끝에 걸리는 자리는 덜)
+    want = [(r[2] * tilt_deg if (tilt_deg and r[7] is not None) else 0.0) for r in rows]
+    feas = []
+    for r, dmax in zip(rows, want):
+        best = 0.0
+        for frac in ((1.0, 0.75, 0.5, 0.25) if dmax else ()):
+            if solve(r, dmax * frac, None)[1] <= TILT_TIP_TOL_M:
+                best = dmax * frac
+                break
+        feas.append(best)
+    # 2) 앞뒤로 훑어 '프레임마다 TILT_STEP_DEG 넘게 안 바뀌고, 어디서도 가능한 최대를 안 넘는' 각 — 못 숙이는 자리 앞에서 미리 천천히 줄인다
+    prof = list(feas)
+    for i in range(1, len(prof)):
+        prof[i] = min(prof[i], prof[i - 1] + TILT_STEP_DEG)
+    for i in range(len(prof) - 2, -1, -1):
+        prof[i] = min(prof[i], prof[i + 1] + TILT_STEP_DEG)
+    if prof:
+        prof[0] = min(prof[0], TILT_STEP_DEG)
+    # 3) 그 각으로 차례로, 직전 프레임 해에서 이어서 푼다 (해가 다른 쪽으로 튀지 않게)
+    prev_q7, prev_arm, grasp_worst = None, None, 0.0
+    for r, deg in zip(rows, prof):
+        k, w, q14 = r[0], r[1], r[3]
+        arm0 = q14[c.arm[:7]]
+        q_init = None if prev_q7 is None else prev_q7 + (arm0 - prev_arm)
+        q7, ep, er, lift = solve(r, deg, q_init)
+        if ep > TILT_TIP_TOL_M:                   # 이어 풀었는데 손끝이 벗어남 → 1° 씩 덜 숙여 보고, 그래도 안 되면 새로 푼 해 (관절이 덜 튀면)
+            for d2 in [max(0.0, deg - i * TILT_STEP_DEG) for i in (1, 2, 3, 4, 5)]:
+                g = solve(r, d2, q_init)
+                if g[1] < ep:
+                    q7, ep, er, lift, deg = *g, d2
+                if ep <= TILT_TIP_TOL_M:
+                    break
+            if ep > TILT_TIP_TOL_M:
+                g = solve(r, deg, None)
+                if g[1] < ep and (prev_q7 is None or np.max(np.abs(np.degrees(g[0] - (prev_q7 + (arm0 - prev_arm))))) <= 10.0):
+                    q7, ep, er, lift = g
+        prev_q7, prev_arm = q7, arm0
+        q = q14.copy()
+        q[c.arm[:7]] = q7
+        out[k] = q
+        if deg:
+            lifts.append(lift)
+        worst, worst_er = max(worst, ep), max(worst_er, er)
+        if ti <= float(tr["t"][k]) <= tg + 1.0:
+            grasp_worst = max(grasp_worst, ep)      # 잡는 순간 (INSERT ~ 들기 1 초) 손끝 오차
+        if w >= 0.999:
+            held.append(deg)      # 잡고 있는 동안 실제로 숙인 각
     return out, {"applied": bool(out), "push_cm": round(float(-fw_robot[1]) * 100, 1), "side_cm": round(float(fw_robot[0]) * 100, 1),
-                 "frames": len(out), "worst_err_mm": round(worst * 1000, 1)}
+                 "tilt_deg": round(float(tilt_deg), 1), "tilt_used_deg": [round(min(held), 1), round(max(held), 1)] if held else None,
+                 "tilt_lift_mm": round(max(lifts) * 1000, 1) if lifts else 0.0, "frames": len(out), "worst_err_mm": round(worst * 1000, 1), "grasp_err_mm": round(grasp_worst * 1000, 1), "worst_ori_err_deg": round(worst_er, 1)}
 
 
 def cmd_run(C, mujoco, ik, a):
@@ -534,9 +666,14 @@ def cmd_run(C, mujoco, ik, a):
         side_m = float(a.get("insert_side_cm") or 0.0) / 100.0
     except (TypeError, ValueError):
         side_m = 0.0
-    if (push_m > 0 or side_m) and not tgt:
+    try:
+        tilt = float(a.get("insert_tilt_deg") or 0.0)
+    except (TypeError, ValueError):
+        tilt = 0.0
+    tilt = max(-30.0, min(30.0, tilt))
+    if (push_m > 0 or side_m or tilt) and not tgt:
         push_q, push_info = _insert_push(C, mujoco, spot, mass, tr, summary.get("phase_t_s") or {}, Rm, min(push_m, 0.05), idx,
-                                         side_m=max(-0.05, min(0.05, side_m)))
+                                         side_m=max(-0.05, min(0.05, side_m)), tilt_deg=tilt)
     names = [d for d in DASH if d] + ["rl_rotation"]
     cols = [i for i, d in enumerate(DASH) if d] + [9]
     pos, quat, cube, cube_q = [], [], [], []

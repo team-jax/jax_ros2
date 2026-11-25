@@ -67,6 +67,31 @@ def unit():
         live_api.cubes = fake(dict(base, depth={"height_cm": 1.5}), [{"id": 1, "marker_mm": 34.0}])
         r = server._rl_live_cube({})
         check("마커 34 mm → 막음 (뎁스가 맞다고 해도)", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:60])
+        # 휴대폰 탭 책상 높이(0.5575)로 잰 결과 → 서버 높이는 안 바꾸고 RL 받침대 높이로 다시 투영 (2026-11-25 '카메라가 이상해짐')
+        import types
+        saved_live = live_api.LIVE
+        live_api.LIVE = types.SimpleNamespace(log_dir=HERE / "logs")
+        seen = []
+        live_api.cubes = lambda td=None, pick_id=None: (seen.append(td), {"ok": True, "stale": False, "mode": "camera", "table": {"d": 0.5575},
+                                                                          "cubes": [{"id": 1, "marker_mm": 45.1}], "pick": dict(base)})[1]
+        r = server._rl_live_cube({"reach_fix_cm": 0, "side_fix_cm": 0})
+        _, _, ratio = server._rl_reproject(-0.018, -0.265, 0.5575, server.RL_TABLE_D)
+        lo_d, hi_d = 0.40, 0.60                       # 마커가 40 mm 로 보이는 높이를 따로 풀기 (이분법)
+        for _ in range(60):
+            mid = (lo_d + hi_d) / 2
+            if 45.1 * server._rl_reproject(-0.018, -0.265, 0.5575, mid)[2] > 40.0:   # 멀수록(d 클수록) 크게 보인다 → 크면 더 가까이
+                hi_d = mid
+            else:
+                lo_d = mid
+        xs, ys, _ = server._rl_reproject(-0.018, -0.265, 0.5575, mid)
+        check("0.5575 로 잰 큐브 → 마커(45.1 mm)로 잰 실제 높이로 다시 투영 (서버 높이는 안 바꿈)", r.get("ok") and seen == [None] and r.get("reproject")
+              and abs(r["reproject"]["to_d"] - mid) < 2e-4 and r["spot"] == __import__("rl_run").spot_from_robot(round(xs, 4), round(ys, 4), 20.0)
+              and abs(r["marker_mm"] - round(45.1 * ratio, 1)) < 1e-6, f"투영 {r.get('reproject')} · 정책 높이로 본 마커 {r.get('marker_mm')} mm")
+        live_api.cubes = lambda td=None, pick_id=None: {"ok": True, "stale": False, "mode": "camera", "table": {"d": 0.5575},
+                                                         "cubes": [{"id": 1, "marker_mm": 39.0}], "pick": dict(base)}
+        r = server._rl_live_cube({})
+        check("마커 39 mm (받침대 없이 실물 책상) → 막음", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:60])
+        live_api.LIVE = saved_live
         live_api.cubes = fake({"ok": False, "reason": "큐브 마커(ID 0)가 안 보임"}, [])
         r = server._rl_live_cube({})
         check("큐브 못 찾음 → 이유", not r.get("ok") and "못 찾음" in r.get("error", ""), r.get("error", "")[:60])

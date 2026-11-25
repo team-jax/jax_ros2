@@ -331,6 +331,7 @@ class Live:
         self.unrect_why = None     # inference.png 정류 되돌리기를 못 한 이유 (unrectify)
         self.imu_fix_deg = None    # 이번 프레임에 중력 센서로 고친 기울기 (°), 못 고쳤으면 None
         self.hist = {}             # 큐브(번호·뎁스)마다 최근 (t, x, y, yaw) — 자리 고르기 (_smooth)
+        self.td_cur = self.hist_td = None   # 지금 프레임을 계산한 책상 높이 · hist 를 쌓은 책상 높이
 
     def start(self):
         if self.thread is None:
@@ -407,6 +408,7 @@ class Live:
         import phone_detect as PD
         import phone_fuse as PF
         td = self.td
+        self.td_cur = td
         c2r, self.imu_fix_deg = phone_api.live_c2r(dcfg)      # 기울기 = 이 프레임의 폰 중력 센서 (저장 안 함)
         dcfg = {**dcfg, "camera_to_robot": c2r, "_imu_tilt": self.imu_fix_deg is not None}
         # 기준 종이가 안 보이면 거치 자세 (기울기는 중력 센서) + 폰 보정값 + 책상 높이 (화면의 d 칸) 로 큐브 자리 (phone_detect)
@@ -485,6 +487,9 @@ class Live:
 
     def _smooth(self, key, c, t):
         """c (x, y, yaw_deg 가 있는 dict) 를 최근 SMOOTH_N 프레임의 중앙값으로 바꾼다 (yaw 는 90° 주기 평균). 옮겼으면(SMOOTH_JUMP_M) 새로."""
+        if self.hist_td != self.td_cur:      # 책상 높이가 바뀌면 지난 자리(다른 높이로 잰 것)를 버린다 (2026-11-25 같은 큐브가 7 cm 튐)
+            self.hist.clear()
+            self.hist_td = self.td_cur
         h = self.hist.setdefault(key, deque(maxlen=SMOOTH_N))
         while h and t - h[0][0] > SMOOTH_S:
             h.popleft()
@@ -493,13 +498,16 @@ class Live:
             my = sorted(p[2] for p in h)[len(h) // 2]
             if math.hypot(c["x"] - mx, c["y"] - my) > SMOOTH_JUMP_M:
                 h.clear()
-        h.append((t, float(c["x"]), float(c["y"]), float(c.get("yaw_deg") or 0.0)))
+        h.append((t, float(c["x"]), float(c["y"]), float(c.get("yaw_deg") or 0.0), c.get("marker_mm")))
         xs, ys = sorted(p[1] for p in h), sorted(p[2] for p in h)
         s4 = sum(math.sin(math.radians(4 * p[3])) for p in h)
         c4 = sum(math.cos(math.radians(4 * p[3])) for p in h)
         c["x"], c["y"] = round(xs[len(xs) // 2], 4), round(ys[len(ys) // 2], 4)
         c["yaw_deg"] = round(math.degrees(math.atan2(s4, c4)) / 4, 1)
         c["n_avg"] = len(h)
+        mm = sorted(p[4] for p in h if p[4] is not None)
+        if mm:                                   # 마커 크기도 중앙값 (강화학습이 큐브 실제 높이를 이것으로 잰다 — 한 장마다 흔들림)
+            c["marker_mm"] = round(mm[len(mm) // 2], 1)
         return c
 
     def stale_s(self):
