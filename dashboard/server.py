@@ -466,6 +466,10 @@ async def api_rl_run(req: Request):
     return JSONResponse(await asyncio.to_thread(rl_run.run, _ik_dir(), b))
 
 
+RL_REACH_FIX_M = 0.05  # 2026-11-25 사용자 '좀 더 앞으로 가서 잡게' 2 cm → '2 cm 밀어서 보정' 4 cm → '1 cm 더' 5 cm: 카메라 큐브 → 강화학습 위치를 어깨에서 멀어지는 쪽으로 이만큼 (m).
+                       # 본문 reach_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm). 수동 위치(강화학습 탭 x·y 칸)에는 안 붙인다
+RL_SIDE_FIX_M = -0.04  # 2026-11-25 사용자 '집는 걸 로봇 기준 오른쪽으로 2 cm' → '로봇 얼굴 기준 좀 더 오른쪽' 4 cm: 카메라 큐브 → 강화학습 위치를 로봇 틀 x 로 (+x = 로봇 왼쪽 → 오른쪽 = −).
+                       # 본문 side_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm, + = 왼쪽)
 RL_TABLE_D = 0.4775   # 강화학습 정책이 학습한 책상 윗면 (어깨 축 아래 m) — 실물 책상(0.5575)이면 큐브를 약 8 cm 받침대 위에
 
 
@@ -491,19 +495,36 @@ def _rl_live_cube(b):
     h = dep.get("height_cm")
     if p.get("blocked"):
         why = p.get("block") or "막힘"
-        if h is not None and h < -4:      # 뎁스가 큐브를 정책 책상보다 한참 아래로 봄 = 받침대 없이 실물 책상 위
+        if h is not None and h < -4 and p.get("block") == "뎁스 높이가 안 맞아 못 감":   # (phone_fuse DEPTH_ROLE "old" 일 때만 뎁스가 막는다)
             why = f"큐브가 정책 높이(어깨 아래 {RL_TABLE_D * 100:.2f} cm)보다 {abs(h):.0f} cm 아래 — 약 8 cm 받침대 위에 올려야 정책이 집는다"
         return {"ok": False, "error": f"카메라 큐브를 못 씀: {why}", "warn": p.get("warn") or []}
-    # ArUco 만이면 뎁스 높이 검사가 없다 → 마커 크기로: 정책 책상보다 8 cm 낮은(받침대 없음) 큐브는 마커가 약 15% 작게(≈34 mm) 재진다
+    # 높이 판정 = 마커 크기 (2026-11-25 ArUco 중심 — 뎁스는 보조): 정책 책상보다 8 cm 낮은(받침대 없음) 큐브는 마커가 약 15% 작게(≈34 mm) 재진다
     cube_row = next((x for x in (r or {}).get("cubes", []) if x.get("id") == p.get("id")), None)
     mm = (cube_row or {}).get("marker_mm")
-    if h is None and mm is not None and mm < 36.0:
+    warn = list(p.get("warn") or [])     # 뎁스 높이(depth_height_cm)는 표시만 — 판정은 마커 크기 (2026-11-25 '뎁스 버리고 ArUco 를 믿자')
+    if mm is not None and mm < 36.0:
         return {"ok": False, "error": f"큐브 마커가 {mm:.1f} mm 로 작게 재짐 (40 mm) — 큐브가 정책 높이보다 낮은 듯 (받침대 없이 실물 책상 위?). "
-                                      "약 8 cm 받침대 위에 올리고 다시", "warn": p.get("warn") or []}
+                                      "약 8 cm 받침대 위에 올리고 다시", "warn": warn}
     c = p["cube"]
-    spot = rl_run.spot_from_robot(c["x"], c["y"], c["yaw_deg"])
+    fix = RL_REACH_FIX_M
+    try:
+        if b.get("reach_fix_cm") is not None:
+            fix = min(max(float(b["reach_fix_cm"]), -5.0), 5.0) / 100.0
+    except (TypeError, ValueError):
+        pass
+    side = RL_SIDE_FIX_M
+    try:
+        if b.get("side_fix_cm") is not None:
+            side = min(max(float(b["side_fix_cm"]), -5.0), 5.0) / 100.0
+    except (TypeError, ValueError):
+        pass
+    r_xy = math.hypot(c["x"], c["y"])
+    gx, gy = (c["x"] + fix * c["x"] / r_xy, c["y"] + fix * c["y"] / r_xy) if r_xy > 1e-6 else (c["x"], c["y"])   # 어깨(원점)에서 큐브 쪽으로
+    gx += side                                                                                                    # 로봇 기준 옆 (− = 오른쪽)
+    spot = rl_run.spot_from_robot(gx, gy, c["yaw_deg"])
     return {"ok": True, "robot": {"x": c["x"], "y": c["y"], "z": -RL_TABLE_D + 0.025, "yaw_deg": c["yaw_deg"]}, "spot": spot,
-            "text": p.get("text"), "id": p.get("id"), "warn": p.get("warn") or [], "depth_height_cm": h, "marker_mm": mm, "table_d": RL_TABLE_D}
+            "reach_fix_cm": round(fix * 100, 1), "side_fix_cm": round(side * 100, 1), "aim": {"x": round(gx, 4), "y": round(gy, 4)},
+            "text": p.get("text"), "id": p.get("id"), "warn": warn, "depth_height_cm": h, "marker_mm": mm, "table_d": RL_TABLE_D}
 
 
 @app.post("/api/rl/live_cube")
@@ -568,7 +589,8 @@ def api_rl_real_state(run_id: str = "", grip_gain: str = "", grip_add_deg: str =
     try:
         out["not_homed"] = [n for n, j in arm.joints.items() if j.motor == "ak45" and not arm.homing.m[f"ak45_{j.id}"].homed]
         out["unsent_servos"] = [n for n, j in arm.joints.items() if j.motor == "servo" and j.name not in arm.servo_sent]
-        out["playback"] = dict(arm.play)
+        import play_phase
+        out["playback"] = play_phase.view(dict(arm.play))   # 단계표·src_map 같은 긴 목록은 빼고
         out["max_speed"] = float(arm.p["max_speed"])
         out["calib_dirty"] = bool(arm.calib_dirty)
         res = rl_run.get_run(run_id) if run_id else None
@@ -616,6 +638,13 @@ def _rl_play_real(b):
         grip = rl_run.grip_params((b or {}).get("grip_gain"), (b or {}).get("grip_add_deg"))
     except (TypeError, ValueError) as e:
         return {"ok": False, "error": str(e)}
+    try:
+        speed = float((b or {}).get("max_speed") or rl_run.RL_SPEED_DEFAULT)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "max_speed 가 숫자가 아님"}
+    if not 1.0 <= speed <= 90.0:
+        return {"ok": False, "error": "max_speed 는 1~90 °/s"}
+    speed = min(speed, float(arm.p["max_speed"]))
     traj = rl_run.real_traj(res, grip=grip, limits=_rl_real_limits())   # 실물만 손가락을 더 쥐게 (rl_run.squeeze_grip)
     big, small = _rl_clip_split(traj, arm.cal)
     if big:
@@ -630,15 +659,11 @@ def _rl_play_real(b):
     if problems and not (b or {}).get("force"):
         return {"ok": False, "need_force": True, "problems": problems,
                 "error": f"검사 {len(problems)}건 (--force 가 필요한 것): " + " / ".join(problems)}
-    try:
-        speed = float((b or {}).get("max_speed") or arm.p["max_speed"])
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "max_speed 가 숫자가 아님"}
-    if not 1.0 <= speed <= 90.0:
-        return {"ok": False, "error": "max_speed 는 1~90 °/s"}
-    r = arm.play_trajectory(traj, speed, stop_gen=gen)
+    traj = rl_run.retime(traj, speed)      # 빠른 구간만 늦춤 (예전: 가장 빠른 손가락 한 프레임에 맞춰 전체를 늦춰 4 배 느렸다)
+    r = arm.play_trajectory(traj, speed, hold=rl_run.RL_HOLD_S, stop_gen=gen)
     if r.get("ok"):
         arm.play["run_id"] = str(b.get("run_id"))     # RL 탭 3D 가 이 실행의 몇 번째 프레임인지 따라가게
+        arm.play["src_map"] = traj["src_map"]          # 늦춘 궤적 프레임 → 원래 RL 프레임 (play_phase.view 가 src_frame 으로)
         import run_record                              # 실행 기록 (역기구학 실물 재생과 같게 logs/runs/ 에)
         run_record.REC.on_play(traj, dict(res.get("params") or {}, max_speed=speed, run_id=str(b.get("run_id"))), arm=arm,
                                extra={"force": bool(b.get("force")), "problems": problems, "speed": speed, "planner": "rl",
@@ -1038,6 +1063,8 @@ import phone_api   # noqa: E402
 phone_api.install(app, LOG_DIR, mode_kind)
 import live_api   # noqa: E402  큐브 실시간 인식 (폰 프레임 스레드) + 가상 장면: /api/live/*, /api/phone/live
 live_api.install(app, LOG_DIR, mode_kind)
+import camcal   # noqa: E402  카메라 보정 (역기구학으로): /api/camcal/*
+camcal.install(app, LOG_DIR)
 import run_record   # noqa: E402  실물 재생마다 logs/runs/<시각>_<kind>/ 에 영상·관절·인식·계획·사건 (run_record.py, static/record.js)
 run_record.install(app, LOG_DIR,
                    lambda: (VM["arm"], True) if MODE["virtual"] else (direct_api.DIRECT.arm if direct_api.DIRECT.connected() else None, False),

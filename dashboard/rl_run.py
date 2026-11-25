@@ -19,12 +19,15 @@ WORKER = HERE / "rl_worker.py"
 MARK = "@@RL@@"
 TIMEOUT_S = 120
 LIMITS = {"x_cm": (-60.0, 60.0), "y_cm": (-80.0, 80.0), "yaw_deg": (-180.0, 180.0), "mass_g": (20.0, 100.0),
-          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0)}
+          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0), "insert_push_cm": (0.0, 5.0), "insert_side_cm": (-5.0, 5.0),
+          "grip_force_x": (1.0, 6.0)}     # 2026-11-25: 이 줄이 없어 grip_force_x 를 넘기면 KeyError (rl_worker.GRIP_FORCE_RANGE 와 같게)
 _lock = threading.Lock()     # 한 번에 하나만 (CPU 를 먹는다, 폰·PC 가 같이 눌러도 섞이지 않게)
 _info_cache = {}
 REF_X, REF_Y = -0.048, -0.285    # 기준 큐브 (위치 오프셋 0, 0) 의 로봇 틀 위치 m — rl.js·README 와 같은 값
 TABLE_TOP_Z = -0.4775            # 로봇 틀에서 책상 윗면 (어깨 아래 47.75 cm). 큐브 중심 = +2.5 cm
 RUNS_KEEP = 5
+INSERT_SIDE_CM = -2.0            # 2026-11-25 사용자 '밀어 넣기 할 때 너무 왼쪽': 같은 구간에 로봇 옆으로 (cm, + 왼쪽 / − 오른쪽, −5~5)
+INSERT_PUSH_CM = 2.0             # 2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': INSERT~들기 동안 쥐는 점을 로봇 앞(−y)으로 이만큼 더 (cm, 0~5)
 _runs = {}                       # run_id -> 결과 (실물 재생이 '화면에 보인 그 궤적'만 보내게)
 
 
@@ -73,6 +76,8 @@ def run(ik_dir, body):
         arg = {"x_cm": _num(b, "x_cm", 0.0), "y_cm": _num(b, "y_cm", 0.0),
                "yaw_deg": _num(b, "yaw_deg", 0.0), "mass_g": _num(b, "mass_g", 40.0),
                "home": b.get("home") is True}   # 기본 = 들고 ㄴ자 복귀(쥔 채) — 화면 기본과 같게 (2026-11-25)
+        arg["insert_push_cm"] = _num(b, "insert_push_cm", INSERT_PUSH_CM)
+        arg["insert_side_cm"] = _num(b, "insert_side_cm", INSERT_SIDE_CM)   # INSERT 중 앞으로 더 (rl_worker._insert_push)
         if b.get("grip_force_x") is not None:           # 정책 쥐는 힘 배율 (rl_worker.GRIP_FORCE_X, 기본 3)
             arg["grip_force_x"] = _num(b, "grip_force_x", 3.0)
         tx, ty = b.get("target_x_cm"), b.get("target_y_cm")     # 놓을 자리 (선택): 둘 다 있거나 둘 다 없어야 한다
@@ -106,11 +111,11 @@ def get_run(run_id):
     return e["res"] if e else None
 
 
-GRIP_DEFAULT = {"gain": 1.4, "add_deg": 10.0}   # 2026-11-25 사용자: 실물 손가락이 덜 쥔다 → 실물로 보낼 때만 더 쥐게 (아래 squeeze_grip)
+GRIP_DEFAULT = {"gain": 1.8, "add_deg": 15.0}   # 2026-11-25 사용자: 실물 손가락이 덜 쥔다 → 실물로 보낼 때만 더 쥐게 (아래 squeeze_grip). 1.4·10° → '더 꽉' 1.8·15°
 GRIP_GAIN_RANGE, GRIP_ADD_RANGE = (1.0, 2.5), (0.0, 25.0)
 GRIP_JOINTS = ("finger1_joint1", "finger2_joint1", "finger3_joint1")   # 더 쥐는 마디 = 첫 마디만 (2026-11-25 사용자: 마디 2 가 바깥으로 간다 —
                          # 더 쥐기를 마디 2 에도 줘서 18.9°(손가락 1·2)·45.5°(손가락 3) 까지 갔다, 시뮬은 7.8°·30.8°). 마디 2 는 시뮬 그대로
-GRIP_FULL_DEG = 5.0      # 이만큼 닫힌 마디부터 더하기 각을 다 준다 (그 아래는 비례 — 펴진 마디·살짝 움직인 마디는 거의 그대로)
+GRIP_FULL_DEG = 2.0      # 이만큼 닫힌 마디부터 더하기 각을 다 준다 (5° → 2°: 시뮬 손가락 1·2 는 큐브에 닿으면 4.6° 갔다 0.3° 로 풀려 거의 안 더해졌다) (그 아래는 비례 — 펴진 마디·살짝 움직인 마디는 거의 그대로)
 
 
 def grip_params(gain=None, add_deg=None):
@@ -127,7 +132,8 @@ def grip_params(gain=None, add_deg=None):
 def squeeze_grip(pos, names, res, gain, add_deg, limits=None):
     """실물용: 정책이 큐브를 쥐는 동안(GRASP_LIFT 시작 ~ HOME 전, 없으면 끝까지) 손가락 마디를 더 닫는다.
     시뮬은 큐브에 닿는 각(마디 1 약 8°, 엄지 마디 2 약 30°)에서 접촉 힘이 나지만 실물 서보는 그 각까지만 가서 거의 안 누른다.
-    목표 = 잡기 시작 + gain·d + add_deg·min(1, d/5°)  (d = 지금 − 잡기 시작 > 0, 펴는 쪽은 그대로). 놓을 때(RELEASE) 펴지면 d 가 줄어 풀린다.
+    목표 = 잡기 시작 + gain·D + add_deg·min(1, D/GRIP_FULL_DEG)  (D = 잡기 시작부터 지금까지 가장 많이 닫힌 양 > 0 — 들고 가며 시뮬이 살짝 펴도 유지).
+    놓기(RELEASE)·HOME 부터는 더하기를 빼서 시뮬처럼 펴진다.
     더 닫는 양은 프레임마다 '시뮬 손가락이 한 프레임에 가장 많이 도는 각 − 이 프레임에 시뮬이 도는 각' 까지만 바꾼다 →
     손가락 최고 속도가 시뮬과 같아 실물 재생이 느려지지 않는다 (재생 속도는 가장 빠른 관절에 맞춰 늦춘다). limits 위 끝 − 0.5° 까지.
     돌려줌: 시뮬보다 가장 많이 더 닫은 각 (°)."""
@@ -136,7 +142,8 @@ def squeeze_grip(pos, names, res, gain, add_deg, limits=None):
     if "GRASP_LIFT" not in ph or len(pos) < 2 or dt <= 0 or (gain == 1.0 and add_deg == 0.0):
         return 0.0
     k0 = min(len(pos) - 1, int(round(ph["GRASP_LIFT"] / dt)))
-    k1 = min(len(pos), int(round(ph["HOME"] / dt))) if "HOME" in ph else len(pos)
+    ends = [ph[n] for n in ("RELEASE", "HOME") if n in ph and ph[n] > ph["GRASP_LIFT"]]     # 놓기·HOME 전까지 쥔다
+    k1 = min(len(pos), int(round(min(ends) / dt))) if ends else len(pos)
     idx = [i for i, n in enumerate(names) if n in GRIP_JOINTS]
     if not idx:
         return 0.0
@@ -144,15 +151,18 @@ def squeeze_grip(pos, names, res, gain, add_deg, limits=None):
     ref = {i: pos[k0][i] for i in idx}
     full, add = math.radians(GRIP_FULL_DEG), math.radians(add_deg)
     extra = {i: 0.0 for i in idx}
+    dmax = {i: 0.0 for i in idx}     # 쥐는 동안 가장 많이 닫힌 양 — 시뮬 손가락이 들고 가며 살짝 펴져도 실물은 그만큼 쥔 채 (2026-11-25 '더 꽉')
     prev = {i: pos[k0 - 1][i] if k0 > 0 else pos[k0][i] for i in idx}   # 바꾸기 전 시뮬 값 (속도 비교용)
     most = 0.0
     for k in range(k0, len(pos)):
         for i in idx:
             sim = pos[k][i]
             d = sim - ref[i]
+            if k < k1:
+                dmax[i] = max(dmax[i], d)
             want = 0.0
-            if k < k1 and d > 0.0:
-                v = ref[i] + gain * d + add * min(1.0, d / full)
+            if k < k1 and dmax[i] > 0.0:
+                v = ref[i] + gain * dmax[i] + add * min(1.0, dmax[i] / full)
                 lim = (limits or {}).get(names[i])
                 if lim:
                     v = min(v, math.radians(float(lim[1]) - 0.5))
@@ -180,10 +190,47 @@ def real_traj(res, grip=None, limits=None):
         r[k] = r[k] + math.pi
         pos.append(r)
     squeezed = squeeze_grip(pos, names, res, *grip, limits=limits) if grip else 0.0
+    dt = float(res["dt"]) or 1.0 / 30
+    phase_frames = {p["name"]: min(len(pos) - 1, int(round(float(p["t"]) / dt))) for p in (res.get("phases") or [])
+                    if isinstance(p, dict) and p.get("t") is not None}
     return {"joint_names": names, "positions": pos, "dt": res["dt"], "unit": "rad", "planner": "rl", "grip_extra_deg": round(squeezed, 1),
+            "phase_frames": phase_frames,
             "policy": "grasp_lift_23025",   # run_record.kind_of 가 '강화학습' 기록으로 분류하는 키
             "reason": "강화학습 정책 grasp_lift_23025 시뮬 궤적 재생 (열린 고리: 실물 피드백으로 다시 계산하지 않음)",
             "summary": res.get("summary")}
+
+
+RL_SPEED_DEFAULT = 30.0   # 2026-11-25 사용자 '강화학습 좀 더 빠르게': 실물 재생 기본 °/s (대시보드 상한 30, 예전 15)
+RL_HOLD_S = 2.0           # 실물 재생 첫 자세 유지 (예전 5 초 — 시작 자세는 이미 4° 안으로 검사함)
+RL_INSERT_SPEED = 10.0    # 2026-11-25: 시뮬 INSERT 는 0.75 초라 실물 모터가 못 따라감 (어깨 6° 늦음 ≈ 손끝 3 cm) → INSERT 구간만 이 °/s 로
+RL_GRASP_DWELL_S = 0.8    # 손가락이 닫히기 직전(GRASP_LIFT 시작)에 멈춰 기다리는 시간 — 팔이 INSERT 끝까지 실제로 간 뒤 쥐게
+
+
+def retime(traj, speed):
+    """빠른 구간만 늦춘다: 프레임 사이 어느 관절이든 speed(°/s) 를 넘으면 그 구간만 사이 프레임을 끼워 넣는다 (dt 그대로, 선형 보간).
+    예전엔 play.schedule 이 궤적에서 가장 빠른 한 프레임(손가락 57°/s)에 맞춰 전체를 늦췄다 → 15°/s 에서 64 초 (이 함수로 30°/s 약 19 초).
+    결과의 src_map[k] = 새 프레임 k 가 온 원래 프레임 번호 (RL 탭 3D 가 실물 재생 프레임을 따라가게)."""
+    q, dt = traj["positions"], float(traj["dt"])
+    if not q or not speed > 0:
+        return dict(traj, src_map=list(range(len(q))))
+    lim = math.radians(speed) * dt * 0.999           # 한 프레임에 허용하는 각 (rad) — 반올림으로 schedule 이 다시 늦추지 않게 조금 덜
+    pf = traj.get("phase_frames") or {}
+    fi, fg = pf.get("INSERT"), pf.get("GRASP_LIFT")   # INSERT 구간은 RL_INSERT_SPEED 로, GRASP_LIFT 시작에서 RL_GRASP_DWELL_S 멈춤
+    lim_ins = math.radians(min(speed, RL_INSERT_SPEED)) * dt * 0.999
+    dwell = int(round(RL_GRASP_DWELL_S / dt)) if fg is not None else 0
+    pos, src = [list(q[0])], [0]
+    for i in range(1, len(q)):
+        a, b = q[i - 1], q[i]
+        li = lim_ins if fi is not None and fg is not None and fi < i <= fg else lim
+        m = max(1, math.ceil(max(abs(y - x) for x, y in zip(a, b)) / li))
+        for s in range(1, m + 1):
+            f = s / m
+            pos.append([x + (y - x) * f for x, y in zip(a, b)])
+            src.append(i if s == m else i - 1)
+        if i == fg:
+            pos += [list(b) for _ in range(dwell)]
+            src += [i] * dwell
+    return dict(traj, positions=pos, src_map=src)
 
 
 # ---------------------------------------------------------------- 카메라 (비전) → 큐브 위치

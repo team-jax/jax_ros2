@@ -2,6 +2,7 @@
 
 화면에는 모드도 사진 올리기도 없다 — 거치한 폰의 프레임마다 있는 것을 다 쓴다 (phone_api 의 GET /api/phone/live 가 find 를 부른다).
 
+    [2026-11-25 DEPTH_ROLE = "view": ArUco 만 믿는다 — 아래의 뎁스 비교·막기·'뎁스만' 은 모두 꺼짐, 뎁스는 화면 표시만]
     둘 다 큐브를 찾음  → 자리·각은 ArUco (더 정확하고 각이 정확). 뎁스로 맞춰 본다: 자리 2 cm 또는 각 15° 넘게 다르면
                          blocked (화면이 '집으러 가기' 를 막는다 — 다음 프레임에서 맞으면 풀린다).
     하나만 찾음        → 그것을 쓰고 어느 것인지 말한다. 못 찾은 쪽의 이유는 note 에.
@@ -17,6 +18,12 @@
 """
 from math import hypot
 
+# 2026-11-25 사용자: '세그멘테이션은 너무 불안정' → '뎁스 버리고 시각화만 하자, ArUco 마커를 믿자'.
+# DEPTH_ROLE = "view" (기본): 자리·각·집기 판정은 ArUco 만. 뎁스는 화면 표시용 (check 숫자·depth 결과는 그대로 돌려줌) —
+#              경고·막기·sources 에 안 들어감, 뎁스만으로는 안 집음.
+#              "aux" : ArUco 만 쓰고 뎁스가 안 맞으면 경고만.   "old" : 예전 (뎁스가 막고, 마커가 없으면 뎁스만으로 집음).
+DEPTH_ROLE = "view"
+ARUCO_MAIN = DEPTH_ROLE != "old"     # (아래 코드·live_api 가 쓰는 이름)
 POS_TOL_M = 0.02
 YAW_TOL_DEG = 15.0
 NAME = {"aruco": "ArUco", "depth": "뎁스"}
@@ -55,6 +62,10 @@ def fuse(aruco, depth):
     depth_off = depth is None or depth.get("stale") or depth.get("age_s") is None
     if depth is not None and not p and not depth_off:
         out["note"].append("뎁스: " + (depth.get("reason") or "못 찾음"))
+    if ARUCO_MAIN and not a:      # 마커가 없으면 안 집는다 — 뎁스 후보는 참고로만 말한다
+        out.update(ok=False, sources=[k for k in out["sources"] if k != "depth"])
+        if p and DEPTH_ROLE == "aux":
+            out["note"].append(f"뎁스(보조)는 큐브 비슷한 것을 x {p['cube']['x']:.3f} y {p['cube']['y']:.3f} 에서 봄 — 뎁스만으로는 안 집음")
     if not out["ok"]:
         if aruco is None and depth_off:
             out["reason"] = NOTHING
@@ -71,6 +82,8 @@ def fuse(aruco, depth):
     main = a or p
     out.update(used=used, cube=dict(main["cube"]))
     for src, r in (("aruco", a), ("depth", p)):
+        if src == "depth" and a and DEPTH_ROLE == "view":
+            continue                  # 뎁스 경고는 판정에 안 씀 (화면은 depth 결과를 직접 보여 줌)
         out["warn"] += [w if src == used or not a else "뎁스: " + w for w in (r or {}).get("warn", [])]
     if a and p:
         dpos = hypot(a["cube"]["x"] - p["cube"]["x"], a["cube"]["y"] - p["cube"]["y"])
@@ -82,16 +95,29 @@ def fuse(aruco, depth):
             bad.append(f"자리 {dpos * 100:.1f} cm")
         if dyaw is not None and dyaw > YAW_TOL_DEG:
             bad.append(f"각 {dyaw:.0f}°")
-        if bad:
+        if DEPTH_ROLE == "view":
+            out["text"] = (f"출처: ArUco (뎁스는 화면 표시만 — ArUco 와 {dpos * 1000:.0f} mm" +
+                           (f" · {dyaw:.0f}°" if dyaw is not None else "") + " 차이)")
+        elif bad and ARUCO_MAIN:
+            out["warn"].append(f"뎁스(보조)와 {' · '.join(bad)} 다름 — ArUco 자리로 간다 (뎁스 x {p['cube']['x']:.3f} y {p['cube']['y']:.3f})")
+            out["text"] = "출처: ArUco (뎁스는 보조 — 안 맞아 참고만)"
+        elif bad:
             out.update(blocked=True, block="ArUco·뎁스가 안 맞음")
             out["warn"].insert(0, f"ArUco 와 뎁스가 {' · '.join(bad)} 다름 (허용 {POS_TOL_M * 100:.0f} cm · {YAW_TOL_DEG:.0f}°) — 큐브가 움직였거나 "
                                   f"기준 종이 자리·책상 높이·폰 거치 자세가 틀림 (뎁스 x {p['cube']['x']:.3f} y {p['cube']['y']:.3f} yaw {p['cube']['yaw_deg']:.0f}°)")
             out["text"] = "출처: ArUco + 뎁스 — 서로 안 맞음"
         else:
-            out["text"] = (f"출처: ArUco + 뎁스 (자리·각은 ArUco, 뎁스와 {dpos * 1000:.0f} mm" +
+            out["text"] = (f"출처: ArUco + 뎁스 보조 (자리·각은 ArUco, 뎁스와 {dpos * 1000:.0f} mm" +
                            (f" · {dyaw:.0f}°" if dyaw is not None else " · 각은 비교 안 함") + " 차이로 맞음)")
     else:
         out["text"] = f"출처: {NAME[used]} 만"
+    if DEPTH_ROLE == "view" and a:    # 판정에 뎁스가 들어갔다고 보이지 않게 (live_api 의 마커 크기 완화도 안 걸리게)
+        out["sources"] = [k for k in out["sources"] if k != "depth"]
     if p and p.get("usable") is False and not out["blocked"]:
-        out.update(blocked=True, block="뎁스 높이가 안 맞아 못 감")
+        if DEPTH_ROLE == "view" and a:
+            pass                      # 뎁스 높이는 안 봄
+        elif ARUCO_MAIN and a:
+            out["warn"].append(f"뎁스(보조)가 큐브를 책상 위 {p.get('height_cm', 0):.1f} cm 로 봄 — 책상 높이 d·거치 자세 확인 (막지는 않음)")
+        else:
+            out.update(blocked=True, block="뎁스 높이가 안 맞아 못 감")
     return out

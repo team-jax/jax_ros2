@@ -115,6 +115,7 @@ def _play_view(play):
     except Exception:
         p = dict(play)
         p.pop("phases", None)
+        p.pop("src_map", None)
         return p
 
 

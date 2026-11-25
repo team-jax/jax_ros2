@@ -127,16 +127,18 @@ check("기준 종이로 잠근 뒤 → 가운데 마커 하나도 잼 (잠긴 �
 img, _ = cube_photo(0.4775, [(0, -0.10, 0.04, 0.0, 1), (1, -0.10, 0.04, 0.0, 0)])   # 2층 탑만 (아래 큐브는 가려짐)
 r = PT.measure_cubes(img, INTR)
 c = PT.combine(None, None, r, 0.4775)
-check("탑만 보임 (2층) → −5 cm 라 넣기 막음", r["ok"] and not c["fill_ok"], f"d {r.get('d')} · {c.get('reason')}")
+# 2026-11-25: 탑 쌓기를 없애 '안 맞음' 은 막지 않고 알림만 ('확인: …' 경고) — 넣기 버튼은 켜진다 (사용자: 카메라에 맞게)
+check("탑만 보임 (2층) → −5 cm (0.428) 라 받는 범위 밖 → 넣기 막음", r["ok"] and not c["in_range"] and not c["fill_ok"] and "범위" in (c.get("reason") or ""),
+      f"d {r.get('d')} · {c.get('reason')}")
 img, _ = cube_photo(0.4775, [(0, -0.10, 0.04, 0.0, -1), (1, 0.08, 0.03, 0.0, -1)])   # 큐브 없이 마커만 책상에 누움 → +5 cm
 r = PT.measure_cubes(img, INTR)
 c = PT.combine(None, None, r, 0.4775)
-check("책상에 누운 마커 → 값 +5 cm 라 d 칸과 2 cm 넘게 달라 넣기 막음", r["ok"] and abs(r["d"] - 0.5275) < 0.008 and c["in_range"] and not c["fill_ok"] and "1층" in c["reason"],
-      f"d {r.get('d')} · {c.get('reason')}")
+check("책상에 누운 마커 → 값 +5 cm 라 d 칸과 2 cm 넘게 다름 → 경고 (넣기는 됨)", r["ok"] and abs(r["d"] - 0.5275) < 0.008 and c["in_range"] and c["fill_ok"] and any("1층" in w for w in c["warn"]),
+      f"d {r.get('d')} · {c.get('warn')}")
 c = PT.combine(None, {"ok": True, "d": r["d"] + 0.005, "tilt_deg": 0.0, "warn": []}, r, 0.4775)
 check("…뎁스가 큐브 마커 값과 2 cm 안이면 넣기 됨", c["fill_ok"] and c["source"] == "cubes", c.get("reason"))
 c = PT.combine(None, None, {**r, "d_normal": r["d"] + 0.03}, r["d"])
-check("마커 법선 값과 3 cm 다름 → 넣기 막음", not c["fill_ok"] and "법선" in c["reason"], c.get("reason"))
+check("마커 법선 값과 3 cm 다름 → 경고 (넣기는 됨)", c["fill_ok"] and any("법선" in w for w in c["warn"]), c.get("warn"))
 r = PT.measure_cubes(cube_photo(0.4775, SPREAD)[0], {**INTR, "size": [TD.W, TD.W]})
 check("보정 image_size 비율이 프레임과 다름 → 보정값 안 씀 (거절)", not r["ok"] and "가로세로" in r["reason"], r.get("reason"))
 for td, want_unsure in ((0.4775, False), (0.4775 + 0.025, True)):

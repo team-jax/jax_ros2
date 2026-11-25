@@ -69,9 +69,9 @@
       <p class="help"><b>열린 고리</b>: 시뮬에서 나온 관절 궤적을 그대로 따라갈 뿐, 실물의 큐브 위치나 관절 피드백으로 정책을 다시 돌리지 않는다. 시작 자세는 <b>AK45 = HOME(모든 관절 0°)</b>, <b>서보 = 손목 0°, 손가락 마디 0°, finger_rotation 180°</b>이다. AK45 는 각도 제어 탭의 'HOME 으로 가기', 서보는 아래 '서보를 시작 자세로 보내기'. <b>역기구학 HOME 의 손가락(−15°)·finger_rotation 0° 와 다르다</b> — 역기구학으로 돌아갈 땐 각도 제어 탭 '서보 한 번에 보내기'.</p>
       <div class="rl-checks" id="rl-real-checks"></div>
       <label class="chk" style="margin-top:10px"><input type="checkbox" id="rl-ack"> 책상 앞 끝이 어깨에서 22.5 cm, 윗면이 어깨 아래 47.75 cm 이고 큐브를 지도 위치에 놓았다</label>
-      <div class="frow2"><label class="field">최고 속도 (°/s)<input id="rl-real-speed" type="number" value="15" min="1" max="90" step="1"><small>처음엔 느리게 (대시보드 상한 30)</small></label>
-        <label class="field">손가락 더 쥐기: 배율<input id="rl-grip-gain" type="number" value="1.4" min="1" max="2.5" step="0.1"><small>닫힌 각 × 이것 (1 = 시뮬 그대로)</small></label>
-        <label class="field">손가락 더 쥐기: 더하기 (°)<input id="rl-grip-add" type="number" value="10" min="0" max="25" step="1"><small>쥐는 동안 첫 마디를 더 닫음 (0 = 안 더함)</small></label></div>
+      <div class="frow2"><label class="field">최고 속도 (°/s)<input id="rl-real-speed" type="number" value="30" min="1" max="90" step="1"><small>빠른 구간만 이 속도로 늦춘다 (대시보드 상한 30)</small></label>
+        <label class="field">손가락 더 쥐기: 배율<input id="rl-grip-gain" type="number" value="1.8" min="1" max="2.5" step="0.1"><small>닫힌 각 × 이것 (1 = 시뮬 그대로)</small></label>
+        <label class="field">손가락 더 쥐기: 더하기 (°)<input id="rl-grip-add" type="number" value="15" min="0" max="25" step="1"><small>쥐는 동안 첫 마디를 더 닫고 놓기 전까지 유지 (0 = 안 더함)</small></label></div>
       <p class="help" style="margin:4px 0 0">시뮬은 큐브에 닿는 각(손가락 마디 약 8°)에서 힘이 나지만 실물 서보는 그 각까지만 가서 덜 쥔다 — <b>실물로 보낼 때만</b> 쥐는 동안 <b>첫 마디(joint1)</b>를 더 닫는다 — 마디 2 는 시뮬 그대로 (더 굽히면 바깥으로 꺾였다). 정책·시뮬·3D 는 그대로. <span id="rl-grip-note"></span></p>
       <label class="chk" style="margin-top:8px"><input type="checkbox" id="rl-real-autohome" checked> 끝까지 재생하면 HOME 으로 돌아가기 (확인창이 뜬다 · 손가락을 펴므로 쥔 큐브는 그 자리에 놓인다)</label>
       <div class="row">
@@ -631,12 +631,12 @@
       const mine = !!(pb && state.run && pb.run_id === state.run.run_id);
       if (mine && pb.running) {
         if (!real.following) { pause(); real.following = true; }
-        show(pb.frame);
+        show(pb.src_frame ?? pb.frame);   // 실물은 빠른 구간만 늦춘 궤적 — 원래 RL 프레임 번호로 (rl_run.retime)
         $("phase-now").textContent = (pb.holding ? "실물: 첫 자세 유지 중 · " : "실물 재생 중 · ") + $("phase-now").textContent;
         clearTimeout(real.fast); real.fast = setTimeout(pollReal, 250);   // 재생 중엔 빨리 읽어 3D 가 부드럽게
       } else if (real.following) {
         real.following = false;
-        if (mine) show(pb.frame);                                        // 끝났거나 멈춘 자리
+        if (mine) show(pb.src_frame ?? pb.frame);                                        // 끝났거나 멈춘 자리
       }
     }
     async function pollReal() {
@@ -694,7 +694,7 @@
       // HOME 으로: 대시보드의 goHome (책상 피하는 길 계획 + 확인창). 별도 페이지(/rl)엔 없어서 숨김
       if (typeof goHome === "function") $("real-home").addEventListener("click", () => goHome());
       else { $("real-home").hidden = true; $("real-autohome").closest("label").hidden = true; }
-      for (const [id, key] of [["grip-gain", "rl-grip-gain"], ["grip-add", "rl-grip-add"]]) {   // 브라우저에 기억
+      for (const [id, key] of [["grip-gain", "rl-grip-gain2"], ["grip-add", "rl-grip-add2"]]) {   // 브라우저에 기억 (2: 2026-11-25 기본 1.4·10 → 1.8·15, 예전 기억이 덮지 않게)
         try { const v = localStorage.getItem(key); if (v !== null && v !== "") $(id).value = v; } catch (e) { /* 없어도 됨 */ }
         $(id).addEventListener("change", () => { try { localStorage.setItem(key, $(id).value); } catch (e) { /* 무시 */ } pollReal(); });
       }

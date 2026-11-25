@@ -602,8 +602,8 @@ def combine(aruco, depth, cubes=None, d_now=None):
             why = (f"큐브 마커 값 {d:.3f} m 가 " + (" · ".join(f"{k} {v:.3f}" for k, v in refs) or "비교할 값") +
                    f" 어느 것과도 {CUBE_CONFIRM_M * 100:.0f} cm 안이 아님 — 큐브 마커는 보이는 가장 낮은 마커를 1층으로 본다 "
                    "(책상에 누운 마커면 +5 cm, 탑만 보이면 −5 cm). 기준 종이·뎁스로 재거나 줄자 값을 d 칸에 넣고 다시")
-        if why:
-            out.update(fill_ok=False, reason=why)
+        if why:   # 2026-11-25 사용자: '카메라에 맞게 움직이면 됨' — 탑 쌓기를 없애 쌓인 큐브 오인 걱정이 없으니 막지 않고 알림만 (넣기 버튼은 켬)
+            out["warn"].append("확인: " + why)
     for _, r in got:
         out["warn"] += r.get("warn", [])
     return out

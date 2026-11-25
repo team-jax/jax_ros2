@@ -427,7 +427,7 @@ class _Solver:
                     out.append(self.point_down(q, lim))
         return out, len(raw)
 
-    def analytic_tip(self, point, hold, lim, mode, iters=10, tol=2e-4, first=False):
+    def analytic_tip(self, point, hold, lim, mode, iters=10, tol=2e-4, first=False, tilt_try=()):
         """기준점 = 집는 점(손끝 사이)인데 역기구학은 손목 중앙으로 (사용자 2026-11-20): 손목 목표 w 를 집는 점 + 수직 위
         (손목↔집는 점 거리) 에서 시작 → 해석 IK(앞 4 관절) + 손목 2 관절로 손 최대한 아래 → 실제 집는 점 오차만큼 w 를 옮겨
         다시 (손이 살짝 기울어도 집는 점이 목표에 오게). 가지마다 따로, 매번 직전 해에 가장 가까운 해를 잇는다.
@@ -441,6 +441,23 @@ class _Solver:
         up = np.array([0.0, 0.0, 1.0]) if getattr(self, "aim", None) is None else np.asarray(self.aim, dtype=float)   # 손 축(site z)이 향할 쪽 (수평 집기 = 옆)
         w0 = np.asarray(point, dtype=float) + up * (self.wrist_above_site + dz)
         qs, n_raw = self.analytic_position(w0, hold, lim)
+        if not qs and tilt_try:
+            # 손목을 큐브 바로 위에 못 두면 (팔이 멀어서) 손을 어깨 쪽으로 기울인 자리에서 시작 (2026-11-25: x +0.141 y −0.281 큐브 —
+            # 손목 바로 위 자리는 안 닿지만 손을 20° 남짓 기울이면 집는 점이 닿는다. 아래 반복이 집는 점 오차를 맞춘다). 계획(pick_plan)만 쓴다
+            R = self.R
+            sh = np.array([R.ORIGIN_XY[0], R.ORIGIN_XY[1], 0.0], dtype=float)       # 어깨 축 (sim, 수평 방향만 씀)
+            toward = sh - np.asarray(point, dtype=float)
+            toward[2] = 0.0
+            nrm = float(np.linalg.norm(toward))
+            if nrm > 1e-6:
+                toward /= nrm
+                L = self.wrist_above_site + dz
+                for deg in tilt_try:
+                    t = math.radians(deg)
+                    w0 = np.asarray(point, dtype=float) + L * (math.cos(t) * up + math.sin(t) * toward)
+                    qs, n_raw = self.analytic_position(w0, hold, lim)
+                    if qs:
+                        break
         out = []
         for q in qs:
             w = w0.copy()
@@ -968,7 +985,7 @@ class _Solver:
         q[self.arm.index("wrist_pitch")], q[self.arm.index("wrist_yaw")] = self._down_q56
         return q
 
-    def grasp_eval(self, S, x, y, verify, check=True, grasp="auto", yaws=None):
+    def grasp_eval(self, S, x, y, verify, check=True, grasp="auto", yaws=None, deep=False):
         """(x, y) 실좌표 -> (코드, 최소 기울기 °, 해 수). 코드 2 = 집을 수 있음, 1 = 손목은 닿지만 손을 수직으로 못 내림, 0 = 안 닿음."""
         import itertools
         from analytic_ik import solve3
@@ -977,6 +994,9 @@ class _Solver:
         # grasp = 집는 방향, yaws = 볼 큐브 yaw (sim °, None = 모두) — pick_plan.Planner.point_check 로 그대로 넘긴다.
         # 수평(옆에서 밀어 넣기)은 손목이 큐브 위가 아니라 옆에 오므로 아래 '큐브 위 손목 자리' 도달 검사에 안 걸려도 본다
         side = check and (grasp == "horizontal" or (grasp == "auto" and yaws is not None))
+        # deep (한 점 판정만, 지도는 아님 — 느려서): 수직 손목 자리가 안 닿아도 기울인 손(pick_plan 숫자 풀이)으로 되는지 본다.
+        # 2026-11-25: x +0.141 y −0.281 큐브 — 계획은 기울여 잡는데 이 검사가 먼저 '팔이 안 닿음' 으로 휴대폰 탭 '집으러 가기' 를 막았다
+        side = side or (deep and check and grasp in ("auto", "tilted"))
         p = np.asarray(self.to_sim([x, y, self.grasp_z() - self.table_d]))
         if float(np.linalg.norm(p - g[0])) > S["reach"] and not side:
             return 0, None, 0
@@ -1142,7 +1162,7 @@ class _Solver:
         grasp, yaws = self._grasp_req(b)   # 먼저: 기울임이면 ranges_deg 를 손목 ±90 으로
         S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
         self.last_why = None
-        c, tilt, ns = self.grasp_eval(S, float(b["x"]), float(b["y"]), verify=True, grasp=grasp, yaws=yaws)
+        c, tilt, ns = self.grasp_eval(S, float(b["x"]), float(b["y"]), verify=True, grasp=grasp, yaws=yaws, deep=True)
         why = getattr(self, "last_why", None) or ("팔이 안 닿음" if c == 0 else "집을 수 있음" if c == 2 else "못 집음")
         return {"ok": True, "graspable": c == 2, "code": c, "reason": why, "grasp": grasp, "tilt_min_deg": None if tilt is None else round(tilt, 1),
                 "n_solutions": ns, "z_table_m": self.grasp_z(), "x": float(b["x"]), "y": float(b["y"]),

@@ -80,6 +80,30 @@ with tempfile.TemporaryDirectory() as tmp:
     high = depth_of(tmp, top_face(CUBE[0], CUBE[1], CUBE[2], z_top=-D + 0.15))
     stale = depth_of(tmp, top_face(*CUBE), age=10.0)
 
+    # ---- 2026-11-25 '뎁스 버리고 시각화만, ArUco 를 믿자' (PF.DEPTH_ROLE = "view", 기본): 뎁스는 판정·경고에 안 들어감
+    check("[뎁스=표시만] 기본값", PF.DEPTH_ROLE == "view" and PF.ARUCO_MAIN is True)
+    for name, dep in (("자리 4 cm 다름", moved), ("각 30° 다름", turned), ("뎁스 높이 이상", high), ("둘 다 맞음", same)):
+        r = PF.fuse(aruco, dep)
+        check(f"[뎁스=표시만] {name} → ArUco 그대로, 안 막음, 뎁스 경고 없음, sources 에 뎁스 없음",
+              r["ok"] and not r["blocked"] and r["cube"] == aruco["cube"] and r["used"] == "aruco" and r["sources"] == ["aruco"]
+              and not any("뎁스" in w for w in r["warn"]) and r["check"] is not None, r.get("text"))
+    r = PF.fuse(None, same)
+    check("[뎁스=표시만] 뎁스만 (프레임 없음) → 안 집음", not r["ok"] and r.get("used") is None, r.get("reason"))
+    r = PF.fuse(no_marker, same)
+    check("[뎁스=표시만] 마커 없음 + 뎁스 → 안 집고 마커 이유", not r["ok"] and r["reason"] == no_marker["reason"], r.get("reason"))
+    r = PF.find(None, None, same)
+    check("[뎁스=표시만] find(프레임 없음, 뎁스) → 안 집음, depth 결과는 화면용으로 그대로", not r["ok"] and r["aruco"] is None and r["depth"] is same)
+    # ---- 'aux' (뎁스 보조: 안 맞으면 경고만)
+    PF.DEPTH_ROLE = "aux"
+    r = PF.fuse(aruco, moved)
+    check("[aux] 자리 4 cm 다름 → 안 막고 경고", r["ok"] and not r["blocked"] and r["cube"] == aruco["cube"] and any("뎁스(보조)" in w for w in r["warn"]), r.get("text"))
+    r = PF.fuse(aruco, high)
+    check("[aux] 뎁스 높이 이상 → 안 막고 경고", r["ok"] and not r["blocked"] and any("책상 위" in w for w in r["warn"]))
+    r = PF.fuse(None, same)
+    check("[aux] 뎁스만 → 안 집고 참고 note", not r["ok"] and any("뎁스만으로는 안 집음" in n for n in r["note"]))
+
+    # ---- 예전 동작 (ARUCO_MAIN = False) 도 그대로 되는지
+    PF.DEPTH_ROLE, PF.ARUCO_MAIN = "old", False
     r = PF.fuse(aruco, off)
     check("ArUco 만 (뎁스 꺼짐)", r["ok"] and r["used"] == "aruco" and r["sources"] == ["aruco"] and not r["blocked"] and r["cube"] == aruco["cube"]
           and r["text"] == "출처: ArUco 만", r.get("text"))
@@ -117,13 +141,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("find(프레임 없음, 뎁스) → 뎁스만", r["ok"] and r["used"] == "depth" and r["aruco"] is None)
     r = PF.find(frame, dict(PD.DEFAULT_CFG), None)
     check("find(프레임, 뎁스 없음) → ArUco 만", r["ok"] and r["used"] == "aruco" and r["sources"] == ["aruco"])
+    PF.DEPTH_ROLE, PF.ARUCO_MAIN = "view", True
     # 프레임 읽기 (phone_depth.read_frame): 폰 프로그램이 저장한 inference.png → 배열 → find
     cfg = {**DP.load_cfg(os.path.join(tmp, "none.json")), "run_dir": tmp}
     check("read_frame: 파일 없음 → None", DP.read_frame(cfg, time.time())[0] is None)
     cv2.imwrite(os.path.join(tmp, "inference.png"), frame)
     got, age, _ = DP.read_frame(cfg, time.time())
     r = PF.find(got, dict(PD.DEFAULT_CFG), depth_of(tmp, top_face(*CUBE)))
-    check("read_frame → find: 저장된 프레임 + 뎁스 → ArUco + 뎁스", got is not None and age < 3 and r["ok"] and r["sources"] == ["aruco", "depth"] and not r["blocked"], r.get("text"))
+    check("read_frame → find: 저장된 프레임 + 뎁스 → ArUco (뎁스는 표시만)", got is not None and age < 3 and r["ok"] and r["sources"] == ["aruco"] and not r["blocked"], r.get("text"))
     check("read_frame: 3초 넘은 프레임 → None", DP.read_frame(cfg, time.time() + 10)[0] is None)
 check("각 차이는 90° 마다 같게", PF.yaw_diff(20, 110) == 0 and PF.yaw_diff(-44, 44) == 2 and PF.yaw_diff(170, -170) == 20)
 

@@ -87,6 +87,81 @@ def wifi_host(cfg):
     return None, "기본 게이트웨이가 없음 — PC 를 폰 핫스팟에 연결했나"
 
 
+def _adb_states():
+    r = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=8)
+    rows = [ln.split() for ln in r.stdout.splitlines()[1:] if ln.strip()]
+    return [x[1] for x in rows if len(x) >= 2]
+
+
+def _usb_android():
+    """USB 에 adb 인터페이스(class ff/42/01)를 연 기기가 있나 — 폰은 꽂혀 있는데 adb 서버가 못 잡는 경우를 가린다."""
+    for itf in Path("/sys/bus/usb/devices").glob("*:*"):
+        try:
+            if ((itf / "bInterfaceClass").read_text().strip(), (itf / "bInterfaceSubClass").read_text().strip(),
+                    (itf / "bInterfaceProtocol").read_text().strip()) == ("ff", "42", "01"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _adb_restart():
+    """엉킨 adb 서버를 다 내리고 새로 띄운다. 2026-11-25: 3시간 전에 뜬 고아 adb 서버(5037 안 들음)가 폰 USB 인터페이스를 잡고 있어
+    실제 서버가 폰을 못 봤다 → kill-server 로는 안 내려가 그 프로세스(내 사용자, adb … fork-server server)를 직접 끈다."""
+    import signal
+    try:
+        subprocess.run(["adb", "kill-server"], capture_output=True, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    me = os.getuid()
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            if d.stat().st_uid != me:
+                continue
+            argv = (d / "cmdline").read_bytes().split(b"\0")
+            if argv and os.path.basename(argv[0]) == b"adb" and b"fork-server" in argv and b"server" in argv:
+                os.kill(int(d.name), signal.SIGTERM)
+        except (OSError, ValueError):
+            continue
+    time.sleep(1.0)
+    subprocess.run(["adb", "start-server"], capture_output=True, timeout=15)
+
+
+ADB_WAIT_S = 10.0     # 켜기 전에 폰이 adb 에 나타나길 기다리는 한계 (서버를 새로 띄운 뒤)
+
+
+def adb_problem(heal=True):
+    """폰 프로그램이 처음에 쓰는 adb (USB) 로 폰이 보이면 None, 아니면 사람이 할 일. Wi-Fi 로 받아도 시작할 때 앱을 adb 로 켠다.
+    heal: 폰이 USB 에 있는데 adb 에 안 보이면 (고아 adb 서버 · offline) adb 서버를 새로 띄우고 ADB_WAIT_S 까지 기다린 뒤 다시 본다."""
+    try:
+        states = _adb_states()
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"adb 를 못 돌림 ({type(e).__name__}) — sudo apt install adb"
+    if "device" in states:
+        return None
+    if heal and "unauthorized" not in states and (_usb_android() or "offline" in states):
+        try:
+            _adb_restart()
+            end = time.monotonic() + ADB_WAIT_S
+            while time.monotonic() < end:
+                states = _adb_states()
+                if "device" in states or "unauthorized" in states:
+                    break
+                time.sleep(0.5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if "device" in states:
+            return None
+    if "unauthorized" in states:
+        return "폰 화면에 뜬 'USB 디버깅 허용' 을 누르기 (안 뜨면 케이블을 뺐다 다시 꽂기)"
+    if "offline" in states:
+        return "폰이 adb 에 offline — 케이블을 뺐다 다시 꽂기"
+    return ("폰이 USB(adb)로 안 보임 — 케이블이 끊겼거나 허브 전원 부족 (커널 'error -71'). 폰을 허브 말고 노트북 USB 포트에 직접, "
+            "데이터 되는 케이블로 꽂고, 폰 잠금 풀기 → 'USB 디버깅 허용'")
+
+
 def phone_model():
     """USB 로 붙은 폰의 모델 (adb getprop ro.product.model), 없거나 adb 가 안 되면 None. 5초 캐시."""
     if time.monotonic() - _MODEL["t"] < 5.0:
@@ -285,6 +360,9 @@ class Pipeline:
         with self.lock:
             if self.pid() is not None:
                 return {"ok": False, "error": "이미 켜져 있음"}
+            why = adb_problem()          # 2026-11-25 '폰 카메라 안 켜져': USB 가 끊겨 폰 프로그램이 adb 에서 바로 죽었다 (Traceback 만 남음)
+            if why:
+                return {"ok": False, "error": "켤 수 없음: " + why}
             calib = calib_choice(cfg)
             self.calib_file = calib["file"]     # live_api.unrectify 가 같은 파일로 되돌린다
             miss = self.missing(cfg, calib["file"])
@@ -370,6 +448,28 @@ def tilt_fix(c2r, up):
 IMU_TILT_MAX_DEG = 8.0     # 중력 센서로 고칠 기울기 상한 — 넘으면 폰이 거치대에 없거나 흔들리는 중 (그때는 저장된 거치 자세 그대로)
 
 
+_IMU = {"v": None, "t": 0.0}
+IMU_SMOOTH_A = 0.15         # 새 중력 값 비중 (지수 평균, 1 장/초면 약 6 장)
+IMU_SMOOTH_RESET_DEG = 3.0  # 이만큼 넘게 달라지면 (폰을 다시 끼움 등) 평균을 버리고 새 값
+
+
+def _imu_smooth(up):
+    import numpy as np
+    u = np.asarray(up, dtype=float)
+    n = np.linalg.norm(u)
+    if not n > 0:
+        return up
+    u = u / n
+    now, prev = time.time(), _IMU["v"]
+    if prev is None or now - _IMU["t"] > 30.0 or math.degrees(math.acos(max(-1.0, min(1.0, float(prev @ u))))) > IMU_SMOOTH_RESET_DEG:
+        v = u
+    else:
+        v = (1 - IMU_SMOOTH_A) * prev + IMU_SMOOTH_A * u
+        v = v / np.linalg.norm(v)
+    _IMU.update(v=v, t=now)
+    return v.tolist()
+
+
 def live_c2r(dcfg):
     """실시간 인식에 쓸 거치 자세 (2026-11-25): 저장된 거치 자세의 기울기를 지금 프레임의 중력 센서로 맞춘다 (저장 안 함, 매 프레임).
     → (c2r, 고친 각 ° 또는 None). 중력 값이 없거나 IMU_TILT_MAX_DEG 넘게 다르면 그대로 (None)."""
@@ -386,6 +486,7 @@ def live_c2r(dcfg):
         return c2r, None
     if not up:
         return c2r, None
+    up = _imu_smooth(up)            # 2026-11-25 '너무 왔다갔다': 프레임마다 중력 센서 잡음이 자리 흔들림이 됐다 → 최근 값 평균
     new, deg = tilt_fix(c2r, up)
     return (new, deg) if deg <= IMU_TILT_MAX_DEG else (c2r, None)
 

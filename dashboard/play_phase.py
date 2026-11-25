@@ -110,6 +110,9 @@ def phases(traj):
 def view(play, now=None):
     """play (재생 상태 dict, phases 포함) → 화면에 보낼 dict: phases 표는 빼고 phase·phase_k·phase_n·left_s 를 붙인다."""
     p = dict(play)
+    m = p.pop("src_map", None)      # RL 실물 재생: 늦춘 궤적 프레임 → 원래 RL 프레임 (RL 탭 3D 가 따라가는 번호)
+    if m:
+        p["src_frame"] = int(m[max(0, min(int(p.get("frame") or 0), len(m) - 1))])
     rows = p.pop("phases", None) or []
     if not rows:
         return p

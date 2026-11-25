@@ -65,10 +65,10 @@ def left_panel(img):
     return img
 
 
-SMOOTH_N = 3            # 큐브 자리 = 최근 이만큼 프레임의 중앙값 (2026-11-25 사용자 '카메라 너무 불안정': 1 장/초라 한 장만 흔들려도 자리가 튀었다)
-SMOOTH_S = 4.0          # 그보다 오래된 프레임은 안 씀
-SMOOTH_JUMP_M = 0.03    # 새 자리가 이만큼 넘게 다르면 큐브를 옮긴 것 — 지난 것을 버리고 새로 (늦게 따라가지 않게)
-HOLD_S = 2.5            # 큐브가 한 장 빠지면 (손·흔들림) 이 안에서는 직전 결과를 그대로 ('held')
+SMOOTH_N = 7            # (3 → 7: 2026-11-25 '너무 왔다갔다') — 큐브 자리 = 최근 이만큼 프레임의 중앙값 (2026-11-25 사용자 '카메라 너무 불안정': 1 장/초라 한 장만 흔들려도 자리가 튀었다)
+SMOOTH_S = 10.0         # (4 → 10) 그보다 오래된 프레임은 안 씀
+SMOOTH_JUMP_M = 0.06    # (3 → 6 cm: 흔들림이 3 cm 넘게 튀면 평균을 버려 그대로 보였다) 새 자리가 이만큼 넘게 다르면 큐브를 옮긴 것 — 지난 것을 버리고 새로 (늦게 따라가지 않게)
+HOLD_S = 6.0            # (2.5 → 6) 큐브가 한 장 빠지면 (손·흔들림) 이 안에서는 직전 결과를 그대로 ('held')
 LIVE_MAX_LEVELS = 1     # 큐브 층 후보 수 (phone_detect max_levels). 2026-11-25 탑 쌓기를 없애 1 = 늘 책상 위 — 기준 종이 없이 층을 고르면
                         # 큐브마다 마커 크기 오차로 한 층 틀렸다. 탑 쌓기를 되살리면 phone_detect.MAX_LEVELS 로
 _UNRECT = {"key": None, "maps": None, "why": None}
@@ -116,6 +116,58 @@ def pipeline_calib(dcfg):
     import phone_api
     f = getattr(phone_api.PIPE, "calib_file", None) if phone_api.PIPE is not None else None
     return Path(dcfg["repo_dir"]) / (f or phone_api.calib_choice(dcfg)["file"])
+
+
+_TXT = threading.local()
+
+
+def _put_text_hook(img, text, org, *a, **k):
+    """_collect_text 안(이 스레드)이면 글자를 그리지 않고 모은다 — 같은 글자를 바로 쓴 그림·뒤집어 볼 그림 두 가지로 그리려고."""
+    rec = getattr(_TXT, "rec", None)
+    if rec is None or k.get("bottomLeftOrigin") or (len(a) >= 6 and a[5]):
+        return _CV2_PUTTEXT[0](img, text, org, *a, **k)
+    rec.append((id(img), str(text), (int(org[0]), int(org[1])), a, k))
+    return img
+
+
+_CV2_PUTTEXT = []
+
+
+def _collect_text():
+    """with _collect_text() as calls: — 이 스레드에서 그 안의 cv2.putText 를 calls 에 모은다 (다른 스레드는 그대로 그린다)."""
+    import contextlib
+    import cv2
+    if not _CV2_PUTTEXT:
+        _CV2_PUTTEXT.append(cv2.putText)
+        cv2.putText = _put_text_hook
+
+    @contextlib.contextmanager
+    def ctx():
+        calls = []
+        prev, _TXT.rec = getattr(_TXT, "rec", None), calls
+        try:
+            yield calls
+        finally:
+            _TXT.rec = prev
+    return ctx()
+
+
+def draw_texts(img, calls, rot180=False):
+    """모은 글자를 img 에 그린다. rot180 이면 '그림을 180° 돌렸을 때 바로 읽히게' (같은 자리, 글자만 거꾸로) 그린 뒤 그림을 돌려서 돌려준다."""
+    import cv2
+    import numpy as np
+    put = _CV2_PUTTEXT[0] if _CV2_PUTTEXT else cv2.putText
+    out = np.ascontiguousarray(img[::-1, ::-1]) if rot180 else img.copy()
+    H, W = img.shape[:2]
+    for text, (x, y), a, k in calls:
+        if not rot180:
+            put(out, text, (x, y), *a, **k)
+            continue
+        font, scale = a[0], a[1]
+        thick = int(a[3]) if len(a) > 3 else int(k.get("thickness", 1))
+        (tw, th), bl = cv2.getTextSize(text, font, scale, thick)
+        put(out, text, (W - 1 - x - tw, H - 1 - y - bl + th), *a, **k)
+    return out
 
 
 def flip_panels(img):
@@ -266,6 +318,7 @@ class Live:
         self.res = None            # 마지막 프레임의 인식 결과
         self.jpeg = None           # 그 프레임 (마커를 그린 것)
         self.raw_jpeg, self.raw_t = None, 0.0   # live.jpg 받은 그대로 (스트림용, 인식 전)
+        self.jpeg_flip = self.raw_jpeg_flip = None   # 화면용 180° 돌린 것 (폰이 거꾸로 끼워짐, ?flip=1) — 글자는 바로 읽히게
         self.frame = None          # 다시 계산용 (책상 높이가 바뀌면)
         self.key = None
         self.td = TD_DEFAULT
@@ -327,6 +380,8 @@ class Live:
                 return None
             self.key = key
             if name == "live.jpg":   # 화면 스트림은 인식(ArUco·뎁스)을 기다리지 않고 받은 그대로 바로 (들쭉날쭉 줄임, 2026-11-24)
+                ok, buf = cv2.imencode(".jpg", img[::-1, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 80])
+                self.raw_jpeg_flip = buf.tobytes() if ok else None
                 self.raw_jpeg, self.raw_t = raw, time.time()
             if name == "inference.png":   # 왼쪽 칸 = 정류된 그림 → 원래 렌즈 모습으로 (unrectify), 못 하면 그대로 + 이유
                 img, self.unrect_why = unrectify(left_panel(img), pipeline_calib(dcfg))
@@ -359,7 +414,8 @@ class Live:
                    "image_rot_q": phone_api.image_rot_q(dcfg), "c2r": dcfg.get("camera_to_robot"),
                    "max_levels": LIVE_MAX_LEVELS}
         now = time.monotonic()
-        multi = PD.detect_cubes(img, cam_cfg)          # 큐브 여러 개 (4x4 ID 0~4, 층, 기울기)
+        with _collect_text() as texts:                 # 글자는 나중에 (바로 / 뒤집어 볼 것) 두 벌로 그린다
+            multi = PD.detect_cubes(img, cam_cfg)      # 큐브 여러 개 (4x4 ID 0~4, 층, 기울기)
         # 뎁스 후보가 여럿이면 휴대폰 탭이 집을 큐브 (ArUco ID 0, 없으면 처음 본 큐브) 쪽을 고르게 (2026-11-25 '헷갈림' 고침)
         aru = [c for c in multi.get("cubes", []) if c.get("id") == PD.CUBE_ID] or sorted(multi.get("cubes", []), key=lambda c: c["id"])[:1]
         prefer = (aru[0]["x"], aru[0]["y"]) if aru else None
@@ -379,9 +435,9 @@ class Live:
         p = dep if dep.get("ok") else None
         if p:
             near = [c for c in cubes if c["level"] == 0 and math.hypot(c["x"] - p["cube"]["x"], c["y"] - p["cube"]["y"]) <= DEPTH_POS_TOL]
-            if near:
+            if near and PF.DEPTH_ROLE != "view":     # view = 뎁스는 표시만 — '뎁스로 확인됨' 표시도 안 붙임
                 near[0]["source"] = "aruco+depth"
-            else:
+            elif not PF.ARUCO_MAIN:      # 2026-11-25 ArUco 중심: 마커 없는 뎁스 덩어리는 큐브 목록·지도에 안 올림 (세그멘테이션이 불안정)
                 cubes.append({"id": None, "x": p["cube"]["x"], "y": p["cube"]["y"], "yaw_deg": p["cube"]["yaw_deg"], "level": 0,
                               "source": "depth", "usable": p.get("usable", True)})
         if src != "test":   # 실물 영상만 (시험 주입은 한 장씩 그대로)
@@ -390,20 +446,31 @@ class Live:
             fc = fused.get("cube") if fused.get("ok") else None
             if fc:
                 fused = {**fused, "cube": self._smooth(("fused", cam_cfg.get("cube_id") if fused.get("used") == "aruco" else "depth"), dict(fc), t)}
+            import camcal   # 카메라 보정 (역기구학으로 맞춘 회전 + 이동, logs/cam_fix.json) — 평균 낸 뒤에, 고치기 전 x·y 는 raw_xy
+            cfix = camcal.load_fix(self.log_dir)
+            if cfix:
+                for c in cubes:
+                    camcal.apply_cube(cfix, c)
+                if fused.get("ok") and fused.get("cube"):
+                    fused = {**fused, "cube": camcal.apply_cube(cfix, dict(fused["cube"]))}
             prev = self.res
             if not cubes and prev and prev.get("cubes") and t - prev.get("t_seen", prev.get("t_frame", 0)) <= HOLD_S and prev.get("td") == td:
                 cubes = [dict(c, held=True) for c in prev["cubes"]]          # 한 장 빠짐 → 직전 결과 (지도·집기가 깜빡이지 않게)
                 fused = prev.get("fused") or fused
                 multi = {**multi, "ok": True, "reason": None, "warn": list(multi.get("warn") or []) + ["큐브가 이번 프레임에 안 보여 직전 자리를 씀"]}
-        jpeg = None
+        jpeg = jpeg_flip = None
         if vis is None:
             vis = img
-        k = 960 / max(vis.shape[:2])
-        if k < 1:
-            vis = cv2.resize(vis, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 78])
-        if ok:
-            jpeg = buf.tobytes()
+        mine = [t[1:] for t in texts if t[0] == id(vis)]
+        views = []
+        for rot in (False, True):
+            v = draw_texts(vis, mine, rot180=rot)
+            k = 960 / max(v.shape[:2])
+            if k < 1:
+                v = cv2.resize(v, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", v, [cv2.IMWRITE_JPEG_QUALITY, 78])
+            views.append(buf.tobytes() if ok else None)
+        jpeg, jpeg_flip = views
         with self.lock:
             if not again:
                 self.n += 1
@@ -413,6 +480,7 @@ class Live:
                         "camera_src": (multi.get("camera") or {}).get("src"), "fused_id": cam_cfg.get("cube_id", PD.CUBE_ID),
                         "t_seen": t if cubes and not any(c.get("held") for c in cubes) else (self.res or {}).get("t_seen", t)}
             self.jpeg = jpeg
+            self.jpeg_flip = jpeg_flip
             self.td_done = td
 
     def _smooth(self, key, c, t):
@@ -448,7 +516,7 @@ class Live:
 
 
 # ---------------------------------------------------------------- 응답
-MARKER_BLOCK_FRAC = 0.15   # 탑 쌓기 없앤 뒤 (LIVE_MAX_LEVELS 1): ArUco 만으로 집을 때 마커 한 변이 40 mm 에서 이만큼 넘게 다르면 막음
+MARKER_BLOCK_FRAC = 0.40   # (0.15 → 0.40: 2026-11-25 '범위 최대한 널널하게' — 45.9 mm 가 막기 경계 바로 아래였다) 탑 쌓기 없앤 뒤 (LIVE_MAX_LEVELS 1): ArUco 만으로 집을 때 마커 한 변이 40 mm 에서 이만큼 넘게 다르면 막음
                            # (2026-11-25 사용자 '너무 빡빡': 뎁스와 3 mm 로 맞는데 마커 44 mm (10%) 라 '층이 확실하지 않음' 으로 막혔다)
 
 
@@ -591,14 +659,14 @@ def install(app, log_dir, mode):
         return JSONResponse(cubes(td, pid))
 
     @app.get("/api/live/frame.jpg")
-    def _frame():
-        j = LIVE.jpeg
+    def _frame(flip: int = 0):
+        j = LIVE.jpeg_flip if flip else LIVE.jpeg
         if j is None or LIVE.mode() == "virtual":
             return Response(status_code=404)
         return Response(j, media_type="image/jpeg", headers={"cache-control": "no-store"})
 
     @app.get("/api/live/stream.mjpg")
-    async def _stream(req: Request):
+    async def _stream(req: Request, flip: int = 0):
         """마지막 프레임을 MJPEG 로 계속 (브라우저 <img> 가 그대로 영상으로 보임, 최대 15 Hz). 2026-11-24 사용자: 웹 프레임이 너무 낮음
         (전엔 0.5 s 마다 한 장씩 다시 불러 최대 2 Hz). 새 프레임이 생길 때만 보낸다."""
         import asyncio
@@ -608,7 +676,11 @@ def install(app, log_dir, mode):
         async def gen():
             last = None
             while not await req.is_disconnected():
-                j = LIVE.raw_jpeg if LIVE.raw_jpeg is not None and time.time() - LIVE.raw_t < 1.5 else LIVE.jpeg
+                raw_ok = LIVE.raw_jpeg is not None and time.time() - LIVE.raw_t < 1.5
+                if flip:     # 폰이 거꾸로 끼워짐 → 180° 돌린 것 (글자는 바로 읽히게 그린 것)
+                    j = LIVE.raw_jpeg_flip if raw_ok and LIVE.raw_jpeg_flip is not None else LIVE.jpeg_flip
+                else:
+                    j = LIVE.raw_jpeg if raw_ok else LIVE.jpeg
                 if j is not None and j is not last:
                     last = j
                     yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(j)).encode() + b"\r\n\r\n" + j + b"\r\n"

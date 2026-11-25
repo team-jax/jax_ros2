@@ -185,7 +185,7 @@ def _find_ik(path):
 
 
 class Planner:
-    def __init__(self, ik_dir, ranges, solver=None, setup=None, d=None, grasp="auto"):
+    def __init__(self, ik_dir, ranges, solver=None, setup=None, d=None, grasp="auto", sy_deg=0.0):
         """solver/setup: 지도(hand_ik worker)가 자기 _Solver 와 grasp_setup 결과로 이 계획기의 집기 조건(point_check)을 쓴다.
         d: 책상 높이 (어깨 축 아래 m, None = 기본 MAP_D; hand_ik.D_RANGE 밖이면 ValueError). solver 를 받으면 그 solver 의 지금 높이.
         책상 기준 높이(z_clear, HOME 나가기 경유점)를 여기서 정하므로 계획기 하나 = 책상 높이 하나 (self.table_d)."""
@@ -200,7 +200,8 @@ class Planner:
         self.s = s = solver
         self.table_d = float(s.table_d)
         self.np = np = s.np
-        self.S = setup if setup is not None else s.grasp_setup(ranges, 0.0)   # 지도와 같은 한계 (shoulder_yaw 0 고정)
+        self.sy_deg = float(sy_deg)     # 집는 동안 고정하는 어깨 옆으로(shoulder_yaw) 각 — 0 이 기본, 왼쪽 먼 큐브만 plan() 이 키워 다시 (SY_TRY_DEG)
+        self.S = setup if setup is not None else s.grasp_setup(ranges, self.sy_deg)   # 지도와 같은 한계 (shoulder_yaw 고정)
         self.lim = self.S["lim"]
         self.hr = s.arm.index("hand_roll")
         self.open = np.asarray(s.env.finger_targets(0.0), dtype=float)
@@ -431,8 +432,10 @@ class Planner:
         if not self.on_table(pc):
             return False, self.off_table_why(), None
         pg = self.grip_target(pc)
-        qs, _ = s.analytic_tip(pg, self.S["q0"], lim, "position", tol=0.002)
+        qs, _ = s.analytic_tip(pg, self.S["q0"], lim, "position", tol=0.002, tilt_try=self.tilt_try())
         qs = [q for q in qs if float(np.linalg.norm(self.grip(q) - pg)) <= TIP_TOL]
+        if not qs and not vertical:
+            qs = self.numeric_tip(pg)          # 해석 IK 가 못 찾는 먼 자리 — 손을 기울인 숫자 해
         if not qs:
             return False, f"손끝(집는 점)을 큐브 중심 +{GRIP_ABOVE_CENTER * 100:g} cm 에 못 맞춤", None
         qs = self.family(qs)
@@ -571,12 +574,51 @@ class Planner:
     def grip(self, q):
         return self.s.fk(q)[0]
 
+    TILT_TRY_DEG = (20.0, 35.0, 50.0)   # 손목을 큐브 바로 위에 못 두면 어깨 쪽으로 기울여 시작해 볼 각 (hand_ik.analytic_tip)
+
+    def tilt_try(self):
+        """수직 집기는 손이 기울면 어차피 안 되니 안 해 본다. 기울임·자동은 해 본다."""
+        return () if self.grasp == "vertical" else self.TILT_TRY_DEG
+
+    NUM_SEEDS = 24       # 숫자 풀이 시작점 수 (numeric_tip)
+
+    def numeric_tip(self, p, yaw_sim=None, seeds=NUM_SEEDS):
+        """해석 IK 가 못 찾을 때 (손목을 큐브 바로 위에 못 두는 먼 자리 — 손을 기울여야 닿음) 숫자로: 집는 점 = p, (yaw_sim 이 있으면) 손 yaw ≡ yaw_sim
+        (mod 90), 관절 한계 안. 2026-11-25: x +0.141 y −0.281 큐브 — 해석 IK 는 0 개, 숫자 풀이는 손 27~35° 기울인 해를 찾는다.
+        돌려줌: 해 목록 (집는 점 TIP_TOL·yaw YAW_TOL 안, 서로 다른 것)."""
+        np, lim = self.np, self.lim
+        try:
+            from scipy.optimize import minimize
+        except ImportError:
+            return []
+        lo, hi = lim[:, 0], lim[:, 1]
+        def cost(q):
+            q = np.clip(q, lo, hi)
+            c = float(np.sum((self.grip(q) - p) ** 2)) * 1e4          # 1 mm → 0.01
+            if yaw_sim is not None:
+                e = ((yaw_sim - self.hand_yaw(q) + 45) % 90) - 45
+                c += (math.radians(e)) ** 2 * 10.0                     # 1° → 0.003
+            return c
+        rs = np.random.default_rng(12345)
+        out = []
+        starts = [self.S["q0"].copy()] + [lo + rs.random(len(lo)) * (hi - lo) for _ in range(seeds - 1)]
+        for q0 in starts:
+            r = minimize(cost, np.clip(q0, lo, hi), method="L-BFGS-B", bounds=list(zip(lo, hi)), options={"maxiter": 400})
+            q = np.clip(r.x, lo, hi)
+            if float(np.linalg.norm(self.grip(q) - p)) > TIP_TOL:
+                continue
+            if yaw_sim is not None and abs(((yaw_sim - self.hand_yaw(q) + 45) % 90) - 45) > YAW_TOL:
+                continue
+            if not any(float(np.abs(q - o).max()) < math.radians(3) for o in out):
+                out.append(q)
+        return out
+
     def candidates(self, p, yaw_sim):
-        """집는 점 = p (sim) 이고 손 yaw ≡ yaw_sim (mod 90) 인 해 모두: 해석 IK 가지 × hand_roll 후보."""
+        """집는 점 = p (sim) 이고 손 yaw ≡ yaw_sim (mod 90) 인 해 모두: 해석 IK 가지 × hand_roll 후보. 해석 IK 가 하나도 못 찾으면 숫자 풀이 (numeric_tip)."""
         np, s, lim, hr = self.np, self.s, self.lim, self.hr
         hold = self.S["q0"].copy()
         hold[hr] = 0.0
-        base, _ = s.analytic_tip(p, hold, lim, "position")
+        base, _ = s.analytic_tip(p, hold, lim, "position", tilt_try=self.tilt_try())
         out = []
         for q in base:
             phi = self.hand_yaw(q)
@@ -587,7 +629,7 @@ class Planner:
                 qq = q.copy()
                 for _ in range(3):    # hand_roll 을 바꿔 다시 풀고(같은 가지), 손 yaw 를 다시 재서 맞춘다
                     h = hold.copy(); h[hr] = float(np.clip(r, lim[hr, 0], lim[hr, 1]))
-                    sols, _ = s.analytic_tip(p, h, lim, "position")
+                    sols, _ = s.analytic_tip(p, h, lim, "position", tilt_try=self.tilt_try())
                     if not sols:
                         qq = None
                         break
@@ -603,6 +645,8 @@ class Planner:
                 inside = bool(np.all(qq >= lim[:, 0] - 1e-6) and np.all(qq <= lim[:, 1] + 1e-6))
                 if abs(e) <= YAW_TOL and tip <= TIP_TOL and inside and not any(float(np.abs(qq - o).max()) < 1e-3 for o in out):
                     out.append(qq)
+        if not out and self.grasp != "vertical":
+            out = self.numeric_tip(p, yaw_sim)
         return out
 
     # ---- 집는 방향 (2026-11-24 사용자: "집는 각도 수직이랑 수평 전부 가능하게"). 수평 = 손 축이 수평, 옆에서 밀어 넣어 큐브의 세로 두 면을 쥠
@@ -982,7 +1026,34 @@ class Planner:
         out[-1] = qg.copy()
         return out
 
+    def _numeric_step(self, prev, p, roll):
+        """_tip_step 의 숫자판 (해석 IK 가 손을 수직 쪽으로 돌려 실패할 때 — 기울인 손으로 잡는 먼 자리, numeric_tip 과 짝):
+        집는 점을 p 로, 앞 자세(prev)에 가장 가깝게 (hand_roll 은 roll 로). 오차 TIP_TOL 넘거나 튀면 None."""
+        np, lim = self.np, self.lim
+        try:
+            from scipy.optimize import minimize
+        except ImportError:
+            return None
+        lo, hi = lim[:, 0].copy(), lim[:, 1].copy()
+        r = float(np.clip(roll, lo[self.hr], hi[self.hr]))
+        lo[self.hr] = hi[self.hr] = r
+        q0 = np.clip(prev.copy(), lo, hi)
+        q0[self.hr] = r
+        def cost(q):
+            return float(np.sum((self.grip(q) - p) ** 2)) * 1e4 + 0.05 * float(np.sum((q - prev) ** 2))
+        res = minimize(cost, q0, method="L-BFGS-B", bounds=list(zip(lo, hi)), options={"maxiter": 200})
+        q = np.clip(res.x, lo, hi)
+        if float(np.linalg.norm(p - self.grip(q))) > TIP_TOL or self._jump(q, prev):
+            return None
+        return q
+
     def _tip_step(self, prev, p, roll):
+        q = self._tip_step_analytic(prev, p, roll)
+        if q is None and self.grasp != "vertical":
+            q = self._numeric_step(prev, p, roll)
+        return q
+
+    def _tip_step_analytic(self, prev, p, roll):
         """한 걸음: 집는 점을 p 로 (hand_roll = roll). 손목 목표 = 앞 손목 + (p − 앞 집는 점) 에서 해석 IK(손 최대한 아래) →
         집는 점 오차만큼 손목을 옮겨 다시. 앞 가지에 가장 가까운 해, 튀면 None. descent·지도(_rise) 가 같이 쓴다."""
         np, s = self.np, self.s
@@ -1290,7 +1361,9 @@ def _plan_style(a, P, style, out):
             what = f"놓을 자리 {level + 1}층 (책상 위 {up * 100:.1f} cm)"
         if not P.on_table(s.to_sim([x, y, 0.0])):
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {P.off_table_why()}"}
-        code = 2 if (hz or up or (what == "큐브" and P.pick_drop)) else s.grasp_eval(P.S, x, y, verify=True, check=False)[0]   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로). 수평은 손목이 큐브 위가 아니라 옆
+        # 'tilted' 은 손이 수직이 아니라 손목이 큐브 바로 위(책상 위 28 cm)에 없어도 된다 → 수직 손목 자리로 보는 '팔이 닿나' 를 건너뛰고
+        # 아래 point_check(기울여 풀기)가 정한다 (2026-11-25: x +0.141 y −0.281 큐브를 기울이면 풀리는데 이 검사가 먼저 '팔이 안 닿음' 으로 막았다)
+        code = 2 if (hz or up or style == "tilted" or (what == "큐브" and P.pick_drop)) else s.grasp_eval(P.S, x, y, verify=True, check=False)[0]   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로). 수평은 손목이 큐브 위가 아니라 옆
         if code == 0:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {REASON[code]}"}
         down = P.pick_drop if what == "큐브" else 0.0   # 집는 자리만 PICK_DROP_M 아래

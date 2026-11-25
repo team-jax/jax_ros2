@@ -41,15 +41,32 @@ def unit():
     try:
         live_api.cubes = fake(dict(base, depth={"height_cm": 2.0}), [{"id": 1, "marker_mm": 40.5}])
         r = server._rl_live_cube({})
-        check("정상 (뎁스 높이 맞음) → 위치", r.get("ok") and r["spot"] == {"x_cm": 2.0, "y_cm": -3.0, "yaw_deg": 20.0}, str(r.get("spot") or r))
-        live_api.cubes = fake(dict(base, blocked=True, block="ArUco·뎁스가 안 맞음", depth={"height_cm": -8.1}), [{"id": 1, "marker_mm": 39.0}])
+        import math as _m, rl_run as _rl
+        fx = server.RL_REACH_FIX_M
+        rr = _m.hypot(-0.018, -0.265)
+        sx = server.RL_SIDE_FIX_M
+        want = _rl.spot_from_robot(-0.018 * (1 + fx / rr) + sx, -0.265 * (1 + fx / rr), 20.0)
+        check(f"정상 → 위치 (어깨에서 {fx * 100:.0f} cm 더 앞, 옆 {sx * 100:+.0f} cm = 로봇 오른쪽)", r.get("ok") and r["spot"] == want
+              and r.get("reach_fix_cm") == round(fx * 100, 1) and r.get("side_fix_cm") == round(sx * 100, 1), str(r.get("spot") or r))
+        r0 = server._rl_live_cube({"reach_fix_cm": 0, "side_fix_cm": 0})
+        check("reach_fix_cm 0 → 고침 없음", r0.get("ok") and r0["spot"] == {"x_cm": 2.0, "y_cm": -3.0, "yaw_deg": 20.0}, str(r0.get("spot")))
+        r9 = server._rl_live_cube({"reach_fix_cm": 99})
+        check("reach_fix_cm 99 → 5 cm 로 자름", r9.get("ok") and r9.get("reach_fix_cm") == 5.0, str(r9.get("reach_fix_cm")))
+        live_api.cubes = fake(dict(base, blocked=True, block="층이 확실하지 않음", depth={"height_cm": -8.1}), [{"id": 1, "marker_mm": 39.0}])
         r = server._rl_live_cube({})
-        check("뎁스가 8 cm 아래 → 막고 받침대 안내", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:70])
+        check("막힌 큐브 → 안 씀, 이유 그대로", not r.get("ok") and "층이 확실하지 않음" in r.get("error", ""), r.get("error", "")[:70])
         live_api.cubes = fake(dict(base, depth={}), [{"id": 1, "marker_mm": 34.0}])
         r = server._rl_live_cube({})
         check("ArUco 만 · 마커 34 mm → 막고 받침대 안내", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:70])
         live_api.cubes = fake(dict(base, depth={}), [{"id": 1, "marker_mm": 38.5}])
         check("ArUco 만 · 마커 38.5 mm → 씀", server._rl_live_cube({}).get("ok"))
+        live_api.cubes = fake(dict(base, depth={"height_cm": -8.0}), [{"id": 1, "marker_mm": 39.5}])
+        r = server._rl_live_cube({})
+        check("뎁스=표시만: 마커 크기 맞음 + 뎁스만 8 cm 아래 → 씀 (뎁스 높이는 표시용 숫자만)", r.get("ok") and r.get("depth_height_cm") == -8.0
+              and not any("뎁스" in w for w in r.get("warn", [])), str(r.get("warn"))[:70])
+        live_api.cubes = fake(dict(base, depth={"height_cm": 1.5}), [{"id": 1, "marker_mm": 34.0}])
+        r = server._rl_live_cube({})
+        check("마커 34 mm → 막음 (뎁스가 맞다고 해도)", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:60])
         live_api.cubes = fake({"ok": False, "reason": "큐브 마커(ID 0)가 안 보임"}, [])
         r = server._rl_live_cube({})
         check("큐브 못 찾음 → 이유", not r.get("ok") and "못 찾음" in r.get("error", ""), r.get("error", "")[:60])
@@ -98,16 +115,17 @@ def e2e():
             check(f"이상한 본문 {body!r} → 500 아님", st != 500, f"HTTP {st}")
         call("/api/live/scene", {"op": "add", "x": -0.018, "y": -0.265, "yaw_deg": 20})
         call("/api/live/scene", {"op": "add", "x": 0.05, "y": -0.30, "yaw_deg": 70})      # 1번: yaw 70 → −20 으로 접혀야
-        st, r = call("/api/rl/live_cube", {})
+        st, r = call("/api/rl/live_cube", {"reach_fix_cm": 0, "side_fix_cm": 0})
         want = rl_run.spot_from_robot(-0.018, -0.265, 20)
         check("큐브 0 → 위치 = spot_from_robot", st == 200 and r.get("ok") and r["spot"] == want and r.get("id") == 0, str((r or {}).get("spot")))
-        st, r1 = call("/api/rl/live_cube", {"pick": 1})
+        st, r1 = call("/api/rl/live_cube", {"pick": 1, "reach_fix_cm": 0, "side_fix_cm": 0})
         check("pick 1 → 큐브 1, 각 70° → −20° 로 접음", st == 200 and r1.get("ok") and r1.get("id") == 1 and abs(r1["spot"]["yaw_deg"] + 20) < 1e-6,
               str((r1 or {}).get("spot")))
+        st, r = call("/api/rl/live_cube", {})      # 기본 = RL_REACH_FIX_M 만큼 앞으로 고친 위치로 집기까지
         if (HERE.parent.parent / "IK").exists() or os.environ.get("JAX_IK_DIR"):
-            st, run = call("/api/rl/run", dict(r["spot"]), timeout=400)
+            st, run = call("/api/rl/run", dict(r["spot"], home=False), timeout=400)
             sm = (run or {}).get("summary") or {}
-            check("그 위치로 강화학습이 집기 끝까지 (가상)", st == 200 and run.get("ok") and sm.get("done") and sm.get("valid_spot"),
+            check("앞으로 고친 위치(기본 RL_REACH_FIX_M)로 강화학습이 집어 들기 끝까지 (가상, 들고 ㄴ 자 유지)", st == 200 and run.get("ok") and sm.get("done") and sm.get("valid_spot"),
                   f"done {sm.get('done')} {sm.get('fail_reason')}")
     finally:
         proc.terminate()

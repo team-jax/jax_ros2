@@ -32,7 +32,8 @@ MAX_LEVELS = 5                    # detect_cubes 가 보는 층 수 (윗면 높�
 DEFAULT_CFG = {"x": -0.05, "y": -0.32, "rot_deg": 0.0, "cube_h": 0.05}   # 종이 가운데 (실좌표 m), 종이 돌아간 각, 큐브 높이
 MAX_SIDE = 2000   # 이보다 큰 사진은 줄여서 찾는다
 CAD_LEVEL_FRAC = 0.25   # 기준 종이 없을 때: 큐브 층이 두 층 사이 이 비율 (0 = 딱, 0.5 = 한가운데) 넘게 어중간하면 층 의심 (level_unsure)
-CAD_SIDE_TOL = 0.04     # 기준 종이 없을 때: 마커 한 변이 40 mm 에서 이 비율 넘게 다르면 unsure (종이 있을 때 0.06 보다 좁게)
+MARKER_WARN_FRAC = 0.30  # 2026-11-25 사용자 'ArUco 오류 너무 많음, 범위 최대한 널널하게': 마커 한 변 경고 10% → 30% (45.9 mm 도 경고였다)
+CAD_SIDE_TOL = 0.30     # (0.04 → 0.30 같은 이유 — 탑 쌓기를 없애 늘 책상 위라 층을 가릴 일이 없다) 기준 종이 없을 때: 마커 한 변이 40 mm 에서 이 비율 넘게 다르면 unsure (종이 있을 때 0.06 보다 좁게)
 
 
 def as_image(image):
@@ -204,7 +205,7 @@ def _cad(cv2, np, cfg, found, w, h, ids):
 def _finish_one(cv2, out, vis, lw, top, side, cpix):
     """detect(): 윗면 4 꼭짓점 (실좌표) → cube {x, y, yaw_deg} + 그림."""
     out["cube_marker_mm"] = round(side, 1)
-    if abs(side - CUBE_MARKER_MM) > 0.1 * CUBE_MARKER_MM:
+    if abs(side - CUBE_MARKER_MM) > MARKER_WARN_FRAC * CUBE_MARKER_MM:
         out["warn"].append(f"큐브 마커 한 변이 {side:.1f} mm 로 재짐 (원래 {CUBE_MARKER_MM:.0f} mm) — 인쇄 크기·큐브 높이·사진 각도 확인")
     cx, cy = top.mean(axis=0)
     ex = (top[1] - top[0]) + (top[2] - top[3])   # 마커 +x (TL→TR, BL→BR)
@@ -292,12 +293,13 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
     (cost, rows), cam = min(fits, key=lambda x: x[0][0])
     # 다른 초점거리 후보가 다른 층으로도 비슷하게 맞으면 (바로 위에서 찍음) 층을 믿을 수 없다
     alt = [f for f, _ in fits if [r[1] for r in f[1]] != [r[1] for r in rows] and f[0] - sum(0.004 * r[1] for r in f[1]) < 0.03 * len(seen)]
-    if alt:
+    one_level = int(cfg.get("max_levels") or MAX_LEVELS) <= 1     # 늘 책상 위 (탑 쌓기 없음) — 층 의심 경고는 뜻이 없다
+    if alt and not one_level:
         out["warn"].append("사진이 거의 바로 위에서 찍혀 큐브 높이(층)가 확실하지 않음 — 비스듬히(30° 이상 기울여) 다시 찍기")
         out["level_unsure"] = True
     # CAD 모드 (기준 종이 없음) 는 초점거리 후보가 하나라 위 판정이 늘 꺼진다 (2026-11-24 검토) → 큐브마다 두 층 사이 어중간함으로 본다:
     # 마커 한 변이 가장 맞는 층과 이웃 층 사이 CAD_LEVEL_FRAC 넘게 와 있으면 층 의심 (2층 맨 위가 1층으로 읽히면 든 큐브가 기존 큐브를 누른다)
-    if src == "cad":
+    if src == "cad" and not one_level:
         amb = [r[0] for r in rows if r[4] > CAD_LEVEL_FRAC]
         if amb:
             out["warn"].append("큐브 " + ", ".join(map(str, amb)) + " 의 층이 확실하지 않음 (기준 종이 없이 두 층 사이로 재짐) — 기준 종이를 같이 보이게 하거나 큐브를 폰 가까이")
@@ -312,7 +314,7 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
         t = _tilt(cv2, np, cam, found[i])
         if t is not None:
             c["tilt_deg"] = round(t, 1)
-        if abs(side - CUBE_MARKER_MM) > (CAD_SIDE_TOL if src == "cad" else 0.06) * CUBE_MARKER_MM or (src == "cad" and frac > CAD_LEVEL_FRAC):
+        if abs(side - CUBE_MARKER_MM) > (CAD_SIDE_TOL if src == "cad" else 0.06) * CUBE_MARKER_MM or (src == "cad" and frac > CAD_LEVEL_FRAC and not one_level):
             c["unsure"] = True
             out["warn"].append(f"큐브 {i}: 마커 한 변이 {side:.1f} mm 로 재짐 (원래 {CUBE_MARKER_MM:.0f}) — 높이·자리가 틀릴 수 있다")
         out["cubes"].append(c)

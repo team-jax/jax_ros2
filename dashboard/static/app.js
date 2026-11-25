@@ -90,10 +90,14 @@ const BLANK_IMG = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAA
 function streamSync(img) {
   const page = img.closest(".page");
   const want = img.dataset.stream === "1" && !document.hidden && !(page && page.hidden);
-  if (want && img.dataset.streamOn !== "1") { img.dataset.streamOn = "1"; img.src = STREAM_URL + "?t=" + Date.now(); }
+  if (want && img.dataset.streamOn !== "1") { img.dataset.streamOn = "1"; img.src = STREAM_URL + "?t=" + Date.now() + (img.dataset.streamQ || ""); }
   else if (!want && img.dataset.streamOn === "1") { img.dataset.streamOn = ""; img.src = BLANK_IMG; }
 }
-function streamSet(img, on) { img.dataset.stream = on ? "1" : ""; streamSync(img); }
+function streamSet(img, on, q) {      // q = 붙일 질의 (예: "&flip=1") — 바뀌면 다시 연결
+  q = q || "";
+  if ((img.dataset.streamQ || "") !== q) { img.dataset.streamQ = q; if (img.dataset.streamOn === "1") { img.dataset.streamOn = ""; img.src = BLANK_IMG; } }
+  img.dataset.stream = on ? "1" : ""; streamSync(img);
+}
 function streamSyncAll() { document.querySelectorAll("img[data-stream]").forEach(streamSync); }
 document.addEventListener("visibilitychange", streamSyncAll);
 // 폰 영상 보기 180° (폰이 거치대에 뒤집혀 끼워짐 — 보기만 돌림, 인식 계산은 안 바뀜). 영상을 누르면 켜고 끔, 기본 켬, 브라우저에 기억

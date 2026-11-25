@@ -419,10 +419,10 @@ def run_lift_drop(C, mujoco, spot, mass, home=True):
     return summary, tr
 
 
-GRIP_FORCE_X = 3.0     # 정책 손가락 행동의 힘 목표 배율 (2026-11-25 사용자: 잡을 때 더 오므리게 — 행동 스케일). 정책이 고른 쥐는 힘
+GRIP_FORCE_X = 5.0     # (3 → 5: 2026-11-25 '손가락 행동 스케일 크게, 더 꽉') — 정책 손가락 행동의 힘 목표 배율 (2026-11-25 사용자: 잡을 때 더 오므리게 — 행동 스케일). 정책이 고른 쥐는 힘
                        # (손가락 1·2 = 0.5·(5 + 4·a7), 엄지 = 5 + 4·a9) 에 곱한다. 12 자리 시뮬: 1× = 11/12 성공 · 첫 마디 6.9/4.3°,
                        # 3× = 11/12 · 8.5/8.9° (5× 부터 한 자리가 큐브를 놓침). IK 레포 파일은 안 고치고 grasp_lift 사본만 바꿔 끼운다
-GRIP_FORCE_RANGE = (1.0, 4.0)
+GRIP_FORCE_RANGE = (1.0, 6.0)
 
 
 def patch_grip(C, x):
@@ -449,6 +449,46 @@ def patch_grip(C, x):
     exec(compile(src, "<grasp_lift grip x%g>" % x, "exec"), ns)
     C.Chain.grasp_lift = ns["grasp_lift"]
     return True
+
+
+INSERT_PUSH_FWD = (0.0, -1.0, 0.0)   # 로봇 틀 '앞' (−y)
+INSERT_PUSH_LEFT = (1.0, 0.0, 0.0)   # 로봇 틀 '왼쪽' (+x) — side_m 이 − 면 오른쪽
+
+
+def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0):
+    """2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': 재생 궤적의 frames 에서 쥐는 점을 로봇 앞(−y)으로 push_m 더 (손 방향 그대로, 실물 범위 안).
+    INSERT 동안 0 → push_m (smoothstep), 잡고 드는 동안 push_m, RETURN 동안 → 0. 물리 시뮬(성공 판정·큐브 움직임)은 고치기 전 궤적 그대로.
+    → (프레임 → 고친 14관절, 정보)"""
+    ti, tg, tret = ph.get("INSERT"), ph.get("GRASP_LIFT"), ph.get("RETURN")
+    tdone = ph.get("DONE") or float(tr["t"][-1])
+    if ti is None or tg is None or tret is None or not tg > ti or not tdone > tret:
+        return {}, {"applied": False, "why": "단계 시각이 없음"}
+    c = C.Chain(*spot, mass=mass)            # 운동학만 (이 Chain 은 돌리지 않는다)
+    fw_robot = push_m * np.array(INSERT_PUSH_FWD) + side_m * np.array(INSERT_PUSH_LEFT)
+    fw = Rm.T @ (push_m * np.array(INSERT_PUSH_FWD) + side_m * np.array(INSERT_PUSH_LEFT))   # 로봇 틀 앞·옆 → 시뮬 world (m)
+    fw[2] = 0.0
+    push_m = 1.0                             # 아래 w * push_m * fw = w * (앞·옆 이동)
+    out, worst = {}, 0.0
+    for k in frames:
+        t = float(tr["t"][k])
+        if t < ti or t > tdone:
+            continue
+        w = C.smoothstep((t - ti) / (tg - ti)) if t < tg else 1.0 if t < tret else 1.0 - C.smoothstep((t - tret) / (tdone - tret))
+        if w <= 1e-4:
+            continue
+        q14 = np.array(tr["q"][k], dtype=float)
+        s = c.scratch
+        s.qpos[:] = c.d.qpos
+        s.qpos[c.qadr] = q14
+        mujoco.mj_kinematics(c.m, s)
+        tip0 = np.mean([s.xpos[b] for b in c.tip_body], axis=0)
+        hq = s.xquat[c.hand_body].copy()
+        q7, ep, er = _ik_translate(C, mujoco, c, q14, hq, tip0, w * push_m * fw, iters=300)
+        q14[c.arm[:7]] = q7
+        out[k] = q14
+        worst = max(worst, ep)
+    return out, {"applied": bool(out), "push_cm": round(float(-fw_robot[1]) * 100, 1), "side_cm": round(float(fw_robot[0]) * 100, 1),
+                 "frames": len(out), "worst_err_mm": round(worst * 1000, 1)}
 
 
 def cmd_run(C, mujoco, ik, a):
@@ -485,11 +525,24 @@ def cmd_run(C, mujoco, ik, a):
     idx = list(range(0, n, stride))
     if idx[-1] != n - 1:
         idx.append(n - 1)
+    push_q, push_info = {}, None
+    try:
+        push_m = float(a.get("insert_push_cm") or 0.0) / 100.0
+    except (TypeError, ValueError):
+        push_m = 0.0
+    try:
+        side_m = float(a.get("insert_side_cm") or 0.0) / 100.0
+    except (TypeError, ValueError):
+        side_m = 0.0
+    if (push_m > 0 or side_m) and not tgt:
+        push_q, push_info = _insert_push(C, mujoco, spot, mass, tr, summary.get("phase_t_s") or {}, Rm, min(push_m, 0.05), idx,
+                                         side_m=max(-0.05, min(0.05, side_m)))
     names = [d for d in DASH if d] + ["rl_rotation"]
     cols = [i for i, d in enumerate(DASH) if d] + [9]
     pos, quat, cube, cube_q = [], [], [], []
     for k in idx:
-        pos.append([round(float(tr["q"][k][i]), 5) for i in cols])
+        qk = push_q.get(k, tr["q"][k])
+        pos.append([round(float(qk[i]), 5) for i in cols])
         p = M @ np.append(tr["cube_pos"][k], 1.0)
         cube.append([round(float(v), 5) for v in p[:3]])
         w, x, y, z = qmul(quat_from_rot(Rm), tr["cube_quat"][k])
@@ -516,6 +569,16 @@ def cmd_run(C, mujoco, ik, a):
             sm[k] = bool(v)
     sm["duration_s"] = float(tr["t"][-1])
     sm["grip_force_x"] = gx if grip_ok else 1.0
+    if push_info is not None:
+        sm["insert_push"] = push_info       # 재생 궤적만 고침 (큐브 3D·성공 판정은 고치기 전 시뮬)
+    try:   # 손가락이 닫히기 직전(GRASP_LIFT 시작) 손가락 끝 가운데 − 큐브 중심, 로봇 틀 cm (+x 왼쪽, −y 앞) — 밀어 넣기 고치기 전 시뮬
+        tg = (summary.get("phase_t_s") or {}).get("GRASP_LIFT")
+        if tg is not None and "tip_mid" in tr:
+            kg = int(np.searchsorted(tr["t"], tg))
+            d = Rm @ (np.asarray(tr["tip_mid"][kg]) - np.asarray(tr["cube_pos"][kg]))
+            sm["grasp_offset_cm"] = [round(float(v) * 100, 1) for v in d]
+    except Exception:
+        pass
     return {"ok": True, "dt": float(tr["t"][idx[1]] - tr["t"][idx[0]]) if len(idx) > 1 else 0.0,
             "joint_names": names, "positions": pos, "cube": cube, "cube_quat": cube_q, "phases": phases,
             "phase_idx": [int(tr["phase"][k]) for k in idx], "table": table, "target_robot": target_robot, "summary": sm, "fit_err_mm": fit_err * 1000}
