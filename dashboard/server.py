@@ -468,10 +468,16 @@ async def api_rl_run(req: Request):
 
 RL_REACH_FIX_M = 0.05  # 2026-11-25 사용자 '좀 더 앞으로 가서 잡게' 2 cm → '2 cm 밀어서 보정' 4 cm → '1 cm 더' 5 cm: 카메라 큐브 → 강화학습 위치를 어깨에서 멀어지는 쪽으로 이만큼 (m).
                        # 본문 reach_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm). 수동 위치(강화학습 탭 x·y 칸)에는 안 붙인다
-RL_SIDE_FIX_M = -0.04  # 2026-11-25 사용자 '집는 걸 로봇 기준 오른쪽으로 2 cm' → '로봇 얼굴 기준 좀 더 오른쪽' 4 cm: 카메라 큐브 → 강화학습 위치를 로봇 틀 x 로 (+x = 로봇 왼쪽 → 오른쪽 = −).
+RL_SIDE_FIX_M = -0.01  # 2026-11-25 사용자 '집는 걸 로봇 기준 오른쪽으로 2 cm' → '로봇 얼굴 기준 좀 더 오른쪽' 4 cm → 2026-11-26 '약 2 cm 왼쪽으로' 2 cm → '왼쪽으로 1 cm' 1 cm: 카메라 큐브 → 강화학습 위치를 로봇 틀 x 로 (+x = 로봇 왼쪽 → 오른쪽 = −).
                        # 본문 side_fix_cm 로 바꿀 수 있다 (−5 ~ 5 cm, + = 왼쪽)
 RL_MARKER_HEIGHT = True   # 2026-11-25 '카메라하고 좀 더 맞혀야': 큐브 실제 높이를 마커 크기(40 mm)로 잰다 — 받침대가 정책 높이와 2~3 cm 달라도 자리가 맞게
-RL_MARKER_HEIGHT_MAX_M = 0.04   # 마커로 잰 높이가 정책 높이에서 이보다 멀면 (받침대 없음·잘못 읽음) 안 쓰고 정책 높이로
+RL_MARKER_POS_RANGE_M = (-0.04, 0.06)   # 2026-11-26 '카메라 위치를 더 확실히': 마커로 잰 높이(정책보다 아래 +)를 늘 위치에 쓴다 — 이 범위로 잘라서 (잘못 읽음이 몇 cm 넘게 끌지 않게)
+RL_MARKER_REF_DROP_M = 0.0475          # 손 보정값(RL_REACH_FIX_M·RL_SIDE_FIX_M)을 맞출 때의 마커 높이 (2026-11-26 화면 35.9 mm = 정책보다 4.75 cm 아래)
+                                       # → 이 높이에서는 예전 자리 그대로, 마커가 달라지면 그 높이 차만큼 같은 시선을 따라 자리를 옮긴다
+RL_MARKER_DOWN = True       # 2026-11-26 '아루코 마커가 작으면 그만큼 보정': 마커로 잰 큐브 높이가 정책보다 낮은 만큼 밀어 넣기 때 손을 더 내린다
+RL_MARKER_DOWN_MAX_CM = 7.0  # (기본 rl_run.INSERT_DOWN_CM 보다 덜 내리지는 않고, 이보다 더 내리지도 않는다 — 시뮬에서 7 cm 까지 손끝 오차 3 mm 안)
+RL_MARKER_DOWN_EXTRA_CM = 1.0   # 2026-11-26 '좀 더 밑으로': 마커 높이 + 이만큼 더 내린다
+RL_MARKER_WARN_MM = 36.0   # 정책 높이로 본 마커가 이보다 작으면 경고만 (2026-11-26 막기 → 경고)
 RL_TABLE_D = 0.4775   # 강화학습 정책이 학습한 책상 윗면 (어깨 축 아래 m) — 실물 책상(0.5575)이면 큐브를 약 8 cm 받침대 위에
 
 
@@ -517,6 +523,7 @@ def _rl_live_cube(b):
     mm = (cube_row or {}).get("marker_mm")
     td_used = ((r or {}).get("table") or {}).get("d")
     reproj = None
+    drop_cm = None
     if r.get("mode") == "camera" and td_used is not None:
         x0, y0, mm0 = p["cube"]["x"], p["cube"]["y"], mm
         x2, y2, ratio = _rl_reproject(x0, y0, td_used, RL_TABLE_D)
@@ -530,19 +537,26 @@ def _rl_live_cube(b):
             z0 = -float(td_used) + 0.05
             z_true = cz + (PD.CUBE_MARKER_MM / float(mm0)) * (z0 - cz)
             d_true = 0.05 - z_true
-            if abs(d_true - RL_TABLE_D) <= RL_MARKER_HEIGHT_MAX_M:
-                d_at = d_true
-                x2, y2, _ = _rl_reproject(x0, y0, td_used, d_true)
+            lo_m, hi_m = RL_MARKER_POS_RANGE_M
+            d_at = RL_TABLE_D + min(max(d_true - RL_TABLE_D, lo_m), hi_m)
+            xa, ya, _ = _rl_reproject(x0, y0, td_used, d_at)                               # 마커 높이로 본 자리
+            xr, yr, _ = _rl_reproject(x0, y0, td_used, RL_TABLE_D + RL_MARKER_REF_DROP_M)  # 손 보정값을 맞춘 높이로 본 자리
+            x2, y2 = x2 + (xa - xr), y2 + (ya - yr)     # 맞춘 높이에서는 예전(정책 높이) 자리 그대로 + 높이 차만큼만 옮김
             reproj_marker = round(d_true, 4)
+            drop_cm = (d_true - RL_TABLE_D) * 100.0     # 마커로 잰 큐브가 정책 높이보다 이만큼 아래 (cm, + = 낮음)
         else:
             reproj_marker = None
-        reproj = {"from_d": td_used, "to_d": round(d_at, 4), "marker_d": reproj_marker,
+        reproj = {"from_d": td_used, "to_d": round(d_at, 4), "marker_d": reproj_marker, "ref_d": round(RL_TABLE_D + RL_MARKER_REF_DROP_M, 4),
                   "dx_cm": round((x2 - x0) * 100, 1), "dy_cm": round((y2 - y0) * 100, 1)}
         p = {**p, "cube": {**p["cube"], "x": round(x2, 4), "y": round(y2, 4)}}
     warn = list(p.get("warn") or [])     # 뎁스 높이(depth_height_cm)는 표시만 — 판정은 마커 크기 (2026-11-25 '뎁스 버리고 ArUco 를 믿자')
-    if mm is not None and mm < 36.0:
-        return {"ok": False, "error": f"큐브 마커가 {mm:.1f} mm 로 작게 재짐 (40 mm) — 큐브가 정책 높이보다 낮은 듯 (받침대 없이 실물 책상 위?). "
-                                      "약 8 cm 받침대 위에 올리고 다시", "warn": warn}
+    if mm is not None and mm < RL_MARKER_WARN_MM:   # 2026-11-26 '너무 깐깐하다': 막지 않고 경고만 (마커 크기는 각도·흔들림에 몇 mm 씩 틀린다)
+        warn.append(f"큐브 마커가 {mm:.1f} mm 로 작게 재짐 (40 mm) — 받침대 높이를 한 번 확인 (그래도 진행)")
+    down = rl_run.INSERT_DOWN_CM                   # 밀어 넣기 때 손을 내리는 양 (cm)
+    if RL_MARKER_DOWN and drop_cm is not None and math.isfinite(drop_cm):
+        down = min(max(down, drop_cm + RL_MARKER_DOWN_EXTRA_CM), RL_MARKER_DOWN_MAX_CM)
+        if drop_cm + RL_MARKER_DOWN_EXTRA_CM > RL_MARKER_DOWN_MAX_CM:
+            warn.append(f"마커로 잰 큐브가 정책 높이보다 {drop_cm:.1f} cm 아래 — 손은 {RL_MARKER_DOWN_MAX_CM:g} cm 까지만 내린다 (받침대 확인)")
     c = p["cube"]
     fix = RL_REACH_FIX_M
     try:
@@ -562,7 +576,8 @@ def _rl_live_cube(b):
     spot = rl_run.spot_from_robot(gx, gy, c["yaw_deg"])
     return {"ok": True, "robot": {"x": c["x"], "y": c["y"], "z": -RL_TABLE_D + 0.025, "yaw_deg": c["yaw_deg"]}, "spot": spot,
             "reach_fix_cm": round(fix * 100, 1), "side_fix_cm": round(side * 100, 1), "reproject": reproj, "aim": {"x": round(gx, 4), "y": round(gy, 4)},
-            "text": p.get("text"), "id": p.get("id"), "warn": warn, "depth_height_cm": h, "marker_mm": mm, "table_d": RL_TABLE_D}
+            "text": p.get("text"), "id": p.get("id"), "warn": warn, "depth_height_cm": h, "marker_mm": mm, "table_d": RL_TABLE_D,
+            "insert_down_cm": round(down, 1), "marker_drop_cm": None if drop_cm is None else round(drop_cm, 1)}
 
 
 @app.post("/api/rl/live_cube")

@@ -394,6 +394,8 @@
       try {
         const body = { x_cm: num("in-x"), y_cm: num("in-y"), yaw_deg: num("in-yaw"), mass_g: num("in-mass"), home: $("home").checked };
         if (targetOk()) { body.target_x_cm = num("in-tx"); body.target_y_cm = num("in-ty"); }
+        const lv = state.liveDown;   // 2026-11-26: 카메라에서 가져온 자리 그대로면 마커 높이만큼 손 내리기도 같이
+        if (lv && lv.x === body.x_cm && lv.y === body.y_cm && lv.yaw === body.yaw_deg) body.insert_down_cm = lv.down;
         const r = await api("/api/rl/run", body);
         if (!r.ok) { setResult("bad", r.error || "실패"); return; }
         state.run = r;
@@ -554,11 +556,12 @@
       $("in-x").value = r.spot.x_cm; $("in-y").value = r.spot.y_cm; $("in-yaw").value = r.spot.yaw_deg;
       if ($("yaw-range")) $("yaw-range").value = r.spot.yaw_deg;
       state.vision = { x: r.robot.x, y: r.robot.y, yaw: r.robot.yaw_deg };
+      state.liveDown = r.insert_down_cm != null ? { x: num("in-x"), y: num("in-y"), yaw: num("in-yaw"), down: r.insert_down_cm } : null;
       if (state.viewer && state.viewer.setObject) state.viewer.setObject({ x: r.robot.x, y: r.robot.y, z: r.robot.z, yaw: r.robot.yaw_deg });
       updateNote();
       const valid = isValidSpot(r.spot.x_cm, r.spot.y_cm);
       note.className = "note" + (valid === false || (r.warn || []).length ? " warn" : "");
-      note.textContent = `카메라 큐브${r.id != null ? " " + r.id + "번" : ""}: 로봇 틀 x ${(r.robot.x * 100).toFixed(1)}, y ${(r.robot.y * 100).toFixed(1)} cm, yaw ${r.robot.yaw_deg.toFixed(0)}° → 위치 (${r.spot.x_cm}, ${r.spot.y_cm}) cm, 각도 ${r.spot.yaw_deg}° · ${r.text || ""}` +
+      note.textContent = `카메라 큐브${r.id != null ? " " + r.id + "번" : ""}: 로봇 틀 x ${(r.robot.x * 100).toFixed(1)}, y ${(r.robot.y * 100).toFixed(1)} cm, yaw ${r.robot.yaw_deg.toFixed(0)}° → 위치 (${r.spot.x_cm}, ${r.spot.y_cm}) cm, 각도 ${r.spot.yaw_deg}°${r.insert_down_cm != null ? ` · 손 ${r.insert_down_cm} cm 내림` + (r.marker_drop_cm != null ? ` (마커 높이 ${r.marker_drop_cm} cm 아래)` : "") : ""} · ${r.text || ""}` +
         (valid === false ? " · ⚠ 정책이 학습한 범위(파란 칸) 밖 — 큐브를 파란 칸 쪽으로" : "") + ((r.warn || []).length ? " · " + r.warn.join(" · ") : "");
       if (run) {
         if (valid === false) { toast("학습 범위 밖이라 돌리지 않음 — 큐브를 파란 칸 쪽으로 옮겨 주세요", true); return; }

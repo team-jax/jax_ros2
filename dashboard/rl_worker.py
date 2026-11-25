@@ -523,8 +523,9 @@ def _low_pt(c, s, geoms):
     return best
 
 
-def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, tilt_deg=0.0):
+def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, tilt_deg=0.0, down_m=0.0):
     """2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': 재생 궤적의 frames 에서 쥐는 점을 로봇 앞(−y)으로 push_m 더 (손 방향 그대로, 실물 범위 안).
+    down_m: 2026-11-26 사용자 '잡을 때 결과가 위로 가 있다, 팔을 낮춰': 같은 구간에 쥐는 점을 로봇 아래(−z)로 (밀어 넣기와 같은 무게).
     tilt_deg: '손목을 아래로 20° 꺾고 잡기' — 같은 구간에 손을 손끝 쪽이 아래로 숙게 돌린다 (쥐는 점은 그 자리 + 밀어 넣기, 팔이 받쳐 줌).
     INSERT 동안 0 → push_m (smoothstep), 잡고 드는 동안 push_m, RETURN 동안 → 0. 물리 시뮬(성공 판정·큐브 움직임)은 고치기 전 궤적 그대로.
     → (프레임 → 고친 14관절, 정보)"""
@@ -536,6 +537,7 @@ def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, 
     fw_robot = push_m * np.array(INSERT_PUSH_FWD) + side_m * np.array(INSERT_PUSH_LEFT)
     fw = Rm.T @ (push_m * np.array(INSERT_PUSH_FWD) + side_m * np.array(INSERT_PUSH_LEFT))   # 로봇 틀 앞·옆 → 시뮬 world (m)
     fw[2] = 0.0
+    fw = fw + Rm.T @ np.array([0.0, 0.0, -down_m])   # 아래로 (로봇 틀 −z → 시뮬 world)
     push_m = 1.0                             # 아래 w * push_m * fw = w * (앞·옆 이동)
     out, worst, worst_er, held, lifts = {}, 0.0, 0.0, [], []
     ts = ph.get("SETTLE") or ti                      # 숙이기는 INSERT 전에 미리 (다가가는 끝 TILT_LEAD_S 동안) — INSERT 는 실물에서 천천히 가는 구간이라
@@ -618,7 +620,7 @@ def _insert_push(C, mujoco, spot, mass, tr, ph, Rm, push_m, frames, side_m=0.0, 
             grasp_worst = max(grasp_worst, ep)      # 잡는 순간 (INSERT ~ 들기 1 초) 손끝 오차
         if w >= 0.999:
             held.append(deg)      # 잡고 있는 동안 실제로 숙인 각
-    return out, {"applied": bool(out), "push_cm": round(float(-fw_robot[1]) * 100, 1), "side_cm": round(float(fw_robot[0]) * 100, 1),
+    return out, {"applied": bool(out), "push_cm": round(float(-fw_robot[1]) * 100, 1), "side_cm": round(float(fw_robot[0]) * 100, 1), "down_cm": round(float(down_m) * 100, 1),
                  "tilt_deg": round(float(tilt_deg), 1), "tilt_used_deg": [round(min(held), 1), round(max(held), 1)] if held else None,
                  "tilt_lift_mm": round(max(lifts) * 1000, 1) if lifts else 0.0, "frames": len(out), "worst_err_mm": round(worst * 1000, 1), "grasp_err_mm": round(grasp_worst * 1000, 1), "worst_ori_err_deg": round(worst_er, 1)}
 
@@ -670,10 +672,15 @@ def cmd_run(C, mujoco, ik, a):
         tilt = float(a.get("insert_tilt_deg") or 0.0)
     except (TypeError, ValueError):
         tilt = 0.0
-    tilt = max(-30.0, min(30.0, tilt))
-    if (push_m > 0 or side_m or tilt) and not tgt:
+    tilt = max(-40.0, min(40.0, tilt))
+    try:
+        down_m = float(a.get("insert_down_cm") or 0.0) / 100.0
+    except (TypeError, ValueError):
+        down_m = 0.0
+    down_m = max(0.0, min(0.08, down_m))
+    if (push_m > 0 or side_m or tilt or down_m) and not tgt:
         push_q, push_info = _insert_push(C, mujoco, spot, mass, tr, summary.get("phase_t_s") or {}, Rm, min(push_m, 0.05), idx,
-                                         side_m=max(-0.05, min(0.05, side_m)), tilt_deg=tilt)
+                                         side_m=max(-0.05, min(0.05, side_m)), tilt_deg=tilt, down_m=down_m)
     names = [d for d in DASH if d] + ["rl_rotation"]
     cols = [i for i, d in enumerate(DASH) if d] + [9]
     pos, quat, cube, cube_q = [], [], [], []

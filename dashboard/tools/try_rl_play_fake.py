@@ -30,6 +30,16 @@ def main():
     res = rl_run.run(os.environ["JAX_IK_DIR"], {"x_cm": -3.0, "y_cm": 1.3, "yaw_deg": 20.0, "home": False, "limits_deg": server._rl_real_limits()})
     check("시뮬 RL 성공", res.get("ok") and (res.get("summary") or {}).get("done"), str((res.get("summary") or {}).get("insert_push")))
     rid = res["run_id"]
+    # 2026-11-26 '잡기 전에 손목 고정, 손가락으로 확실히 잡기': 실물 재생에서 잡는 자세에 팔을 세워 두고 손가락만 먼저 닫는다
+    tq = rl_run.retime(rl_run.real_traj(res, grip=rl_run.grip_params()), rl_run.RL_SPEED_DEFAULT)
+    P, names, fg = tq["positions"], tq["joint_names"], tq["phase_frames"]["GRASP_LIFT"]
+    fc = rl_run._finger_cols(names)
+    arm_c = [i for i in range(len(names)) if i not in fc]
+    k0 = tq["src_map"].index(fg)
+    still = next((k for k in range(k0, len(P)) if max(abs(P[k][i] - P[k0][i]) for i in arm_c) > 1e-9), len(P)) - k0
+    closed = max(P[k0 + still - 1][i] - P[k0][i] for i in fc)
+    want = rl_run.RL_GRASP_DWELL_S + rl_run.RL_GRASP_CLOSE_S + rl_run.RL_GRASP_HOLD_S - 0.1
+    check("잡을 때 팔 고정 → 손가락 먼저 닫음", still * tq["dt"] >= want and closed > 0.1, f"팔 멈춤 {still * tq['dt']:.2f} s · 손가락 최대 {closed * 57.3:.1f}° 닫힘")
     check("연결 전 → 거절", not server._rl_play_real({"run_id": rid, "ack_table": True}).get("ok"))
     tmp = Path(tempfile.mkdtemp())
     cal = tmp / "calibration.json"

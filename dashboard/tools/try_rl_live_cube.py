@@ -3,7 +3,7 @@
 
   .venv/bin/python dashboard/tools/try_rl_live_cube.py
 
-1) 판단 (서버 _rl_live_cube, 가짜 인식 결과): 받침대 없이 낮은 큐브(뎁스 −8 cm · 마커 34 mm)는 막고 이유를 말한다, 정상은 위치로 바꾼다.
+1) 판단 (서버 _rl_live_cube, 가짜 인식 결과): 받침대 없이 낮은 큐브(마커 34 mm)는 막지 않고 경고만 (2026-11-26 너무 깐깐), 정상은 위치로 바꾼다.
 2) 끝에서 끝 (가상 모드 시험 서버, 빈 포트): 가상 큐브 → 위치 오프셋이 rl_run.spot_from_robot 과 같은가, 큐브 각 90° 접기,
    큐브 번호 고르기, 큐브 없음, 이상한 본문(500 없음), 그 위치로 강화학습이 끝까지 집는가 (JAX_IK_DIR 가 있으면).
 팔·CAN·폰은 안 건드린다 (가상 모드).
@@ -57,7 +57,7 @@ def unit():
         check("막힌 큐브 → 안 씀, 이유 그대로", not r.get("ok") and "층이 확실하지 않음" in r.get("error", ""), r.get("error", "")[:70])
         live_api.cubes = fake(dict(base, depth={}), [{"id": 1, "marker_mm": 34.0}])
         r = server._rl_live_cube({})
-        check("ArUco 만 · 마커 34 mm → 막고 받침대 안내", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:70])
+        check("ArUco 만 · 마커 34 mm → 막지 않고 받침대 경고", r.get("ok") and any("받침대" in w for w in r.get("warn", [])), str(r.get("warn") or r.get("error"))[:70])
         live_api.cubes = fake(dict(base, depth={}), [{"id": 1, "marker_mm": 38.5}])
         check("ArUco 만 · 마커 38.5 mm → 씀", server._rl_live_cube({}).get("ok"))
         live_api.cubes = fake(dict(base, depth={"height_cm": -8.0}), [{"id": 1, "marker_mm": 39.5}])
@@ -66,7 +66,7 @@ def unit():
               and not any("뎁스" in w for w in r.get("warn", [])), str(r.get("warn"))[:70])
         live_api.cubes = fake(dict(base, depth={"height_cm": 1.5}), [{"id": 1, "marker_mm": 34.0}])
         r = server._rl_live_cube({})
-        check("마커 34 mm → 막음 (뎁스가 맞다고 해도)", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:60])
+        check("마커 34 mm → 경고만 (뎁스가 맞다고 해도)", r.get("ok") and any("받침대" in w for w in r.get("warn", [])), str(r.get("warn") or r.get("error"))[:60])
         # 휴대폰 탭 책상 높이(0.5575)로 잰 결과 → 서버 높이는 안 바꾸고 RL 받침대 높이로 다시 투영 (2026-11-25 '카메라가 이상해짐')
         import types
         saved_live = live_api.LIVE
@@ -83,14 +83,38 @@ def unit():
                 hi_d = mid
             else:
                 lo_d = mid
-        xs, ys, _ = server._rl_reproject(-0.018, -0.265, 0.5575, mid)
+        xa, ya, _ = server._rl_reproject(-0.018, -0.265, 0.5575, mid)
+        xr, yr, _ = server._rl_reproject(-0.018, -0.265, 0.5575, server.RL_TABLE_D + server.RL_MARKER_REF_DROP_M)
+        xp, yp, _ = server._rl_reproject(-0.018, -0.265, 0.5575, server.RL_TABLE_D)
+        xs, ys = xp + (xa - xr), yp + (ya - yr)       # 2026-11-26: 손 보정을 맞춘 마커 높이(4.75 cm 아래)에서는 예전 자리, 그 차만큼만 옮긴다
         check("0.5575 로 잰 큐브 → 마커(45.1 mm)로 잰 실제 높이로 다시 투영 (서버 높이는 안 바꿈)", r.get("ok") and seen == [None] and r.get("reproject")
               and abs(r["reproject"]["to_d"] - mid) < 2e-4 and r["spot"] == __import__("rl_run").spot_from_robot(round(xs, 4), round(ys, 4), 20.0)
               and abs(r["marker_mm"] - round(45.1 * ratio, 1)) < 1e-6, f"투영 {r.get('reproject')} · 정책 높이로 본 마커 {r.get('marker_mm')} mm")
         live_api.cubes = lambda td=None, pick_id=None: {"ok": True, "stale": False, "mode": "camera", "table": {"d": 0.5575},
                                                          "cubes": [{"id": 1, "marker_mm": 39.0}], "pick": dict(base)}
         r = server._rl_live_cube({})
-        check("마커 39 mm (받침대 없이 실물 책상) → 막음", not r.get("ok") and "받침대" in r.get("error", ""), r.get("error", "")[:60])
+        check("마커 39 mm (받침대 없이 실물 책상?) → 막지 않고 경고만", r.get("ok") and any("받침대" in w for w in r.get("warn", [])), str(r.get("warn") or r.get("error"))[:80])
+        # 2026-11-26 '마커가 작으면 그만큼 보정': 마커로 잰 높이가 정책보다 낮은 만큼 밀어 넣기 때 손을 더 내린다 (기본 이상, RL_MARKER_DOWN_MAX_CM 이하)
+        import rl_run as _RR
+        downs = {}
+        for pol in (40.0, 37.0, 36.0, 35.9, 35.0, 33.0):       # 정책 높이로 본 마커 mm (화면 숫자) → 서버 책상(0.5575) 기준 날값으로 넣는다
+            raw = pol / ratio
+            live_api.cubes = lambda td=None, pick_id=None, raw=raw: {"ok": True, "stale": False, "mode": "camera", "table": {"d": 0.5575},
+                                                                     "cubes": [{"id": 1, "marker_mm": raw}], "pick": dict(base)}
+            downs[pol] = server._rl_live_cube({})
+        txt = " · ".join(f"{k:g} mm → {v.get('insert_down_cm')} cm (마커 높이 {v.get('marker_drop_cm')})" for k, v in downs.items())
+        check("마커 40 · 37 mm (정책 높이와 비슷) → 손 내리기 = 기본", downs[40.0]["insert_down_cm"] == _RR.INSERT_DOWN_CM == downs[37.0]["insert_down_cm"]
+              and abs(downs[40.0]["marker_drop_cm"]) < 0.2, txt)
+        check("마커가 작을수록 손을 더 내림 (마커 높이만큼)", downs[36.0].get("ok") and _RR.INSERT_DOWN_CM < downs[36.0]["insert_down_cm"] < downs[35.0]["insert_down_cm"] <= server.RL_MARKER_DOWN_MAX_CM
+              and abs(downs[36.0]["insert_down_cm"] - downs[36.0]["marker_drop_cm"] - server.RL_MARKER_DOWN_EXTRA_CM) < 0.11, txt)
+        xp, yp, _ = server._rl_reproject(base["cube"]["x"], base["cube"]["y"], 0.5575, server.RL_TABLE_D)
+        r35, r40 = downs[35.9]["robot"], downs[40.0]["robot"]
+        check("마커 35.9 mm (손 보정 맞춘 높이) → 자리 예전 그대로", abs(r35["x"] - xp) < 0.002 and abs(r35["y"] - yp) < 0.002,
+              f"({r35['x']}, {r35['y']}) vs ({xp:.4f}, {yp:.4f})")
+        check("마커 40 mm (4.75 cm 더 높음) → 같은 시선을 따라 카메라 쪽으로 1~3 cm", 0.01 < ((r40["x"] - xp) ** 2 + (r40["y"] - yp) ** 2) ** 0.5 < 0.03,
+              f"({r40['x'] - xp:+.4f}, {r40['y'] - yp:+.4f}) m")
+        check("마커 아주 작음 → 상한까지만 + 경고", downs[33.0].get("ok") and downs[33.0]["insert_down_cm"] == server.RL_MARKER_DOWN_MAX_CM
+              and any("까지만" in w for w in downs[33.0].get("warn", [])), txt)
         live_api.LIVE = saved_live
         live_api.cubes = fake({"ok": False, "reason": "큐브 마커(ID 0)가 안 보임"}, [])
         r = server._rl_live_cube({})

@@ -517,8 +517,8 @@ async function phRL() {
     note("카메라에서 큐브 읽는 중…", "run");
     const c = await post("/api/rl/live_cube", {}, true);
     if (!c.ok) { note("카메라 큐브를 못 씀", "bad", (c.error || "") + ((c.warn || []).length ? " · " + c.warn.join(" · ") : "")); return; }
-    note(`큐브 위치 (${c.spot.x_cm}, ${c.spot.y_cm}) cm · ${c.spot.yaw_deg}° — 강화학습 시뮬 돌리는 중…`, "run", c.text || "");
-    const r = await post("/api/rl/run", { x_cm: c.spot.x_cm, y_cm: c.spot.y_cm, yaw_deg: c.spot.yaw_deg, home: false }, true);
+    note(`큐브 위치 (${c.spot.x_cm}, ${c.spot.y_cm}) cm · ${c.spot.yaw_deg}° ${c.insert_down_cm != null ? ` · 손 ${c.insert_down_cm} cm 내림` + (c.marker_drop_cm != null ? ` (마커 높이 ${c.marker_drop_cm} cm 아래)` : "") : ""} — 강화학습 시뮬 돌리는 중…`, "run", (c.text || "") + ((c.warn || []).length ? " · ⚠ " + c.warn.join(" · ") : ""));
+    const r = await post("/api/rl/run", { x_cm: c.spot.x_cm, y_cm: c.spot.y_cm, yaw_deg: c.spot.yaw_deg, home: false, ...(c.insert_down_cm != null ? { insert_down_cm: c.insert_down_cm } : {}) }, true);
     if (!r.ok) { note("강화학습 시뮬 실패", "bad", r.error || ""); return; }
     const sm = r.summary || {};
     if (!sm.done) { note("시뮬에서 못 집음 — 실물로 안 보냄", "bad", (sm.fail_reason || "") + (sm.valid_spot === false ? " · 정책이 학습한 범위 밖 — 큐브를 옮기기" : "")); return; }

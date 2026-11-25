@@ -19,15 +19,16 @@ WORKER = HERE / "rl_worker.py"
 MARK = "@@RL@@"
 TIMEOUT_S = 120
 LIMITS = {"x_cm": (-60.0, 60.0), "y_cm": (-80.0, 80.0), "yaw_deg": (-180.0, 180.0), "mass_g": (20.0, 100.0),
-          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0), "insert_push_cm": (0.0, 5.0), "insert_side_cm": (-5.0, 5.0), "insert_tilt_deg": (-30.0, 30.0),
+          "target_x_cm": (-60.0, 60.0), "target_y_cm": (-80.0, 80.0), "insert_push_cm": (0.0, 5.0), "insert_side_cm": (-5.0, 5.0), "insert_tilt_deg": (-40.0, 40.0), "insert_down_cm": (0.0, 8.0),
           "grip_force_x": (1.0, 6.0)}     # 2026-11-25: 이 줄이 없어 grip_force_x 를 넘기면 KeyError (rl_worker.GRIP_FORCE_RANGE 와 같게)
 _lock = threading.Lock()     # 한 번에 하나만 (CPU 를 먹는다, 폰·PC 가 같이 눌러도 섞이지 않게)
 _info_cache = {}
 REF_X, REF_Y = -0.048, -0.285    # 기준 큐브 (위치 오프셋 0, 0) 의 로봇 틀 위치 m — rl.js·README 와 같은 값
 TABLE_TOP_Z = -0.4775            # 로봇 틀에서 책상 윗면 (어깨 아래 47.75 cm). 큐브 중심 = +2.5 cm
 RUNS_KEEP = 5
-INSERT_SIDE_CM = -2.0            # 2026-11-25 사용자 '밀어 넣기 할 때 너무 왼쪽': 같은 구간에 로봇 옆으로 (cm, + 왼쪽 / − 오른쪽, −5~5)
-INSERT_TILT_DEG = 30.0           # 2026-11-25 사용자 '손목을 아래로 20° 정도 꺾고 잡으면' → '좀 더 구부려' 30°: 같은 구간에 손을 손끝 쪽이 아래로 (쥐는 점은 그대로, −30~30)
+INSERT_SIDE_CM = -2.0            # 2026-11-25 사용자 '밀어 넣기 할 때 너무 왼쪽': 같은 구간에 로봇 옆으로 (cm, + 왼쪽 / − 오른쪽, −5~5). (2026-11-26 '2 cm 왼쪽' 은 여기 말고 server.RL_SIDE_FIX_M 로 — 여기를 0 으로 하면 어깨가 범위 끝에 걸려 손목 숙이기가 30° → 5° 로 줄었다)
+INSERT_TILT_DEG = 35.0           # 2026-11-25 사용자 '손목을 아래로 20° 정도 꺾고 잡으면' → '좀 더 구부려' 30° → 2026-11-26 '좀 더 손목 아래로' 35° (40° 는 시뮬에서 34° 에 막히는 자리가 있다): 같은 구간에 손을 손끝 쪽이 아래로 (쥐는 점은 그대로, −30~30)
+INSERT_DOWN_CM = 4.5             # 2026-11-26 사용자 '잡을 때 위로 가 있다 — 팔을 낮춰' 2 → '밀어 넣기 할 때 좀 더 내리면서' 3.5 → '좀 더 밑으로' 4.5: INSERT~들기 동안 쥐는 점을 로봇 아래로 이만큼 더 (cm, 0~4)
 INSERT_PUSH_CM = 2.0             # 2026-11-25 사용자 'INSERT 작업중 앞으로 더 땡겨': INSERT~들기 동안 쥐는 점을 로봇 앞(−y)으로 이만큼 더 (cm, 0~5)
 _runs = {}                       # run_id -> 결과 (실물 재생이 '화면에 보인 그 궤적'만 보내게)
 
@@ -79,6 +80,7 @@ def run(ik_dir, body):
                "home": b.get("home") is True}   # 기본 = 들고 ㄴ자 복귀(쥔 채) — 화면 기본과 같게 (2026-11-25)
         arg["insert_push_cm"] = _num(b, "insert_push_cm", INSERT_PUSH_CM)
         arg["insert_side_cm"] = _num(b, "insert_side_cm", INSERT_SIDE_CM)
+        arg["insert_down_cm"] = _num(b, "insert_down_cm", INSERT_DOWN_CM)
         arg["insert_tilt_deg"] = _num(b, "insert_tilt_deg", INSERT_TILT_DEG)   # INSERT 중 앞으로 더 (rl_worker._insert_push)
         if b.get("grip_force_x") is not None:           # 정책 쥐는 힘 배율 (rl_worker.GRIP_FORCE_X, 기본 3)
             arg["grip_force_x"] = _num(b, "grip_force_x", 3.0)
@@ -206,6 +208,41 @@ RL_SPEED_DEFAULT = 30.0   # 2026-11-25 사용자 '강화학습 좀 더 빠르게
 RL_HOLD_S = 2.0           # 실물 재생 첫 자세 유지 (예전 5 초 — 시작 자세는 이미 4° 안으로 검사함)
 RL_INSERT_SPEED = 10.0    # 2026-11-25: 시뮬 INSERT 는 0.75 초라 실물 모터가 못 따라감 (어깨 6° 늦음 ≈ 손끝 3 cm) → INSERT 구간만 이 °/s 로
 RL_GRASP_DWELL_S = 0.8    # 손가락이 닫히기 직전(GRASP_LIFT 시작)에 멈춰 기다리는 시간 — 팔이 INSERT 끝까지 실제로 간 뒤 쥐게
+RL_GRASP_FIRST = True     # 2026-11-26 사용자 '잡기 전에 손목 고정하고 손가락으로 확실히 잡기 — 잡으면서 올라감': 정책은 GRASP_LIFT 첫 0.6 초에
+                          # 손가락을 닫으며 팔꿈치 10°·손목 비틀기 30° 를 같이 움직인다 → 실물 재생에서는 팔(손목 포함)을 잡는 자세에 세워 두고
+RL_GRASP_CLOSE_S = 1.2    # 손가락만 시뮬의 GRASP_LIFT 첫 이 시간만큼 먼저 닫고 (더 쥐기 포함)
+RL_GRASP_HOLD_S = 0.4     # 닫은 채 이만큼 더 기다린 뒤, 팔을 원래 궤적대로 (손가락은 닫은 자세를 유지 — 다시 펴지지 않게)
+
+
+def _finger_cols(names):
+    return [i for i, n in enumerate(names or []) if n.startswith("finger") and "_joint" in n]   # finger_rotation 은 팔 쪽 (고정)
+
+
+def _grasp_first(q, names, pf, dt):
+    """(위 RL_GRASP_FIRST) → [(행, 원래 프레임, 손가락만 닫는 프레임인가)] (retime 이 이 사이를 보간). 못 하면 None."""
+    fg = pf.get("GRASP_LIFT")
+    fc = _finger_cols(names)
+    if not RL_GRASP_FIRST or fg is None or not fc or not 0 < fg < len(q) - 1:
+        return None
+    nxt = [v for v in pf.values() if v is not None and v > fg]
+    kc = min(fg + max(1, int(round(RL_GRASP_CLOSE_S / dt))), (min(nxt) if nxt else len(q)) - 1, len(q) - 1)
+    if kc <= fg:
+        return None
+    keys = [(list(r), i, False) for i, r in enumerate(q[:fg + 1])]
+    for j in range(fg + 1, kc + 1):                       # 팔 = 잡는 자세 그대로, 손가락 = 시뮬 순서대로 닫기
+        row = list(q[fg])
+        for c in fc:
+            row[c] = q[j][c]
+        keys.append((row, fg, True))
+    hold = list(keys[-1][0])
+    keys += [(list(hold), fg, True) for _ in range(int(round(RL_GRASP_HOLD_S / dt)))]
+    for j in range(fg + 1, len(q)):                       # 이제 팔이 원래대로 — 손가락은 kc 의 닫힌 자세 (kc 뒤는 시뮬 그대로, kc 에서 같아 이어진다)
+        row = list(q[j])
+        if j <= kc:
+            for c in fc:
+                row[c] = q[kc][c]
+        keys.append((row, j, False))
+    return keys
 
 
 def retime(traj, speed):
@@ -220,16 +257,19 @@ def retime(traj, speed):
     fi, fg = pf.get("INSERT"), pf.get("GRASP_LIFT")   # INSERT 구간은 RL_INSERT_SPEED 로, GRASP_LIFT 시작에서 RL_GRASP_DWELL_S 멈춤
     lim_ins = math.radians(min(speed, RL_INSERT_SPEED)) * dt * 0.999
     dwell = int(round(RL_GRASP_DWELL_S / dt)) if fg is not None else 0
-    pos, src = [list(q[0])], [0]
-    for i in range(1, len(q)):
-        a, b = q[i - 1], q[i]
-        li = lim_ins if fi is not None and fg is not None and fi < i <= fg else lim
+    keys = _grasp_first(q, traj.get("joint_names"), pf, dt)
+    if keys is None:
+        keys = [(list(r), i, False) for i, r in enumerate(q)]
+    pos, src = [list(keys[0][0])], [0]
+    for n in range(1, len(keys)):
+        a, (b, i, closing) = keys[n - 1][0], keys[n]
+        li = lim_ins if not closing and fi is not None and fg is not None and fi < i <= fg and keys[n - 1][1] != i else lim
         m = max(1, math.ceil(max(abs(y - x) for x, y in zip(a, b)) / li))
         for s in range(1, m + 1):
             f = s / m
             pos.append([x + (y - x) * f for x, y in zip(a, b)])
-            src.append(i if s == m else i - 1)
-        if i == fg:
+            src.append(i if s == m else keys[n - 1][1])
+        if i == fg and not closing and keys[n - 1][1] != i:
             pos += [list(b) for _ in range(dwell)]
             src += [i] * dwell
     return dict(traj, positions=pos, src_map=src)
